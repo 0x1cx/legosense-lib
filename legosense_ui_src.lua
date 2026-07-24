@@ -3193,15 +3193,5 @@ end
 S.setVisible(false)   -- stay hidden and untouched until CreateWindow is called
 S.relayout()
 
--- ===== TEST (delete when done): open window + 10 empty tabs, 10 different lucide icons =====
-do
-    S.Library:CreateWindow({})
-    local testIcons = { "home", "eye", "crosshair", "hammer", "star", "shield", "zap", "heart", "flame", "compass" }
-    for i = 1, 10 do
-        S.Library:CreateTab("Tab " .. i, testIcons[i])
-    end
-end
--- ===== END TEST =====
-
 -- the chunk returns the library directly, so: local Lib = loadstring(...)()  then  Lib:CreateWindow{...}
 return S.Library
