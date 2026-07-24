@@ -280,9 +280,18 @@ end
 -- cached in memory per preset so switching back never refetches; applied in relayout to decode.
 S.THEME_IMG = {
     Matcha = "https://raw.githubusercontent.com/nvqren/Matcha-Waifu/refs/heads/main/waifu.png",
-    Columbina = "https://api.alo.ne/file/7uqcdu",
+    Columbina = "https://api.alo.ne/file/zusqrf",
 }
 UI.themeImg = {}
+UI.themeImgRatio = {}   -- preset -> width/height, read from the PNG so it never stretches
+-- read width/height from a PNG's IHDR chunk (bytes 17-24, big-endian) -> aspect ratio
+local function pngRatio(d)
+    if type(d) ~= "string" or #d < 24 then return nil end
+    local function be(a) return string.byte(d, a) * 16777216 + string.byte(d, a+1) * 65536 + string.byte(d, a+2) * 256 + string.byte(d, a+3) end
+    local w, h = be(17), be(21)
+    if w and h and w > 0 and h > 0 then return w / h end
+    return nil
+end
 function S.loadThemeImage(preset)
     local url = S.THEME_IMG[preset]
     if not url then return end
@@ -302,7 +311,11 @@ function S.loadThemeImage(preset)
                 pcall(writefile, path, d)
             end
         end
-        if data then UI.themeImg[preset] = data S.Win.dirty = true end
+        if data then
+            UI.themeImg[preset] = data
+            UI.themeImgRatio[preset] = pngRatio(data) or S.Const.IMG_RATIO
+            S.Win.dirty = true
+        end
     end)
 end
 
@@ -1462,14 +1475,19 @@ function S.relayoutRaw()
 
     local cx = x + sw + S.PAD
     local cw = w - sw - S.PAD * 2 - 8
-    -- theme background art: bounded by sidebar + topbar, centered in content
+    -- theme background art: fit inside the content box (sidebar/topbar bounded), true aspect ratio
     do
-        local artH = h - S.TB - 4
-        local artW = math.floor(artH * S.Const.IMG_RATIO)
-        if artW > cw then
-            artW = cw
-            artH = math.floor(artW / S.Const.IMG_RATIO)
+        local ratio = UI.themeImgRatio[S.Cfg.preset] or S.Const.IMG_RATIO
+        local maxH = h - S.TB - 6
+        local maxW = cw
+        -- fit within both dimensions preserving aspect -> never stretched, never spills the box
+        local artW = maxH * ratio
+        local artH = maxH
+        if artW > maxW then
+            artW = maxW
+            artH = maxW / ratio
         end
+        artW, artH = math.floor(artW), math.floor(artH)
         local imgData = UI.themeImg[S.Cfg.preset]
         S.D.themeImg.Visible = S.Win.visible and imgData ~= nil
         -- (re)apply Data whenever the applied theme differs, then touch Position/Size -> decode
