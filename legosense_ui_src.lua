@@ -462,18 +462,23 @@ function S.startAssets()
 end
 
 -- ========== snow ==========
--- plain "*" sparkles, no glow. flakes fade in at spawn and fade out near every edge and at
--- the bottom so they never pop; the fall advances in real px/s for a linear, smooth descent.
+-- each flake is a 6-point star built from 3 crossing Lines. Lines are vector shapes (sub-pixel,
+-- like the sidebar) so they fall perfectly smoothly -- unlike "*" glyphs which snap to the pixel
+-- grid and step. flakes also slowly rotate + twinkle, and fade near every edge so nothing pops.
 S.Snow = { flakes = {}, hidden = true }
 for i = 1, S.Const.SNOW_N do
-    local fs = math.floor((12 + (i % 6)) * 1.3 + 0.5)
+    local rad = 2.6 + (i % 4) * 0.9
+    local lines = {}
+    for k = 1, 3 do
+        lines[k] = S.New("Line", { Color = S.BaseC1, Thickness = 1, Transparency = 0, ZIndex = 32, Visible = false })
+    end
     S.Snow.flakes[i] = {
-        obj = S.New("Text", { Text = "*", Color = S.BaseC1, Transparency = 0, ZIndex = 32, Font = 0, Size = fs, Visible = false }),
-        fs = fs,
+        lines = lines, rad = rad,
         fx = math.random(), fy = math.random(),
         vy = (20 + math.random() * 8) * 1.2,
         amp = 3 + math.random() * 6, freq = 0.3 + math.random() * 0.5,
         ph = math.random() * 6.28, br = math.random(),
+        spin = (math.random() - 0.5) * 0.8,
     }
 end
 
@@ -481,7 +486,7 @@ function S.updateSnow(dt, t)
     local on = S.Win.visible and S.Cfg.bgFx == "Snow"
     if not on then
         if not S.Snow.hidden then
-            for _, f in ipairs(S.Snow.flakes) do f.obj.Visible = false end
+            for _, f in ipairs(S.Snow.flakes) do for _, l in ipairs(f.lines) do l.Visible = false end end
             S.Snow.hidden = true
         end
         return
@@ -501,13 +506,25 @@ function S.updateSnow(dt, t)
         local m = math.min(px - (S.Win.x + 4), (S.Win.x + S.Win.w - 10) - px, py - topB, (S.Win.y + S.Win.h - 8) - py)
         local edge = math.max(0, math.min(1, m / 16))
         edge = edge * edge * (3 - 2 * edge)
-        local shown = m > -f.fs
-        f.obj.Visible = shown
+        local shown = m > -f.rad
         if shown then
             local twinkle = 0.4 + 0.4 * math.abs(math.sin(t * 1.4 + f.ph))
-            f.obj.Position = Vector2.new(px - f.fs * 0.28, py - f.fs * 0.55)
-            f.obj.Color = S.lerpColor(base, S.Theme.White, f.br * 0.4)
-            f.obj.Transparency = twinkle * edge * S.Cfg.opacity
+            local col = S.lerpColor(base, S.Theme.White, f.br * 0.4)
+            local a = twinkle * edge * S.Cfg.opacity
+            local rot = t * f.spin + f.ph
+            local r = f.rad
+            for k = 1, 3 do
+                local ang = rot + (k - 1) * 1.0472   -- 60 deg apart -> 6-point star
+                local dx, dy = math.cos(ang) * r, math.sin(ang) * r
+                local l = f.lines[k]
+                l.From = Vector2.new(px - dx, py - dy)
+                l.To = Vector2.new(px + dx, py + dy)
+                l.Color = col
+                l.Transparency = a
+                l.Visible = true
+            end
+        else
+            for k = 1, 3 do f.lines[k].Visible = false end
         end
     end
 end
@@ -1559,6 +1576,7 @@ function S.relayoutRaw()
                         row.lbl.Position = Vector2.new(innerX, ry + 6)
                         row.lbl.Text = S.truncate(row.label, innerW - 62)
                         row.chip.Position = Vector2.new(sx + swid - 12 - 52, ry + 4)
+                        row.chip.Size = Vector2.new(52, 17)   -- reset so clipObj shrink doesn't stick
                         row.chip.Corner = S.CR(3)
                         row.chipRect = { x = sx + swid - 12 - 52, y = ry + 4, w = 52, h = 17 }
                         row.chipT.Position = Vector2.new(sx + swid - 12 - 26, ry + 6)
@@ -1612,6 +1630,7 @@ function S.relayoutRaw()
                         row.lbl.Position = Vector2.new(innerX, ry + 10)
                         row.lbl.Text = S.truncate(row.label, innerW - 28)
                         row.sw.Position = Vector2.new(sx + swid - 12 - 16, ry + 9)
+                        row.sw.Size = Vector2.new(16, 16)   -- reset each layout so clipObj shrink doesn't stick
                         row.sw.Corner = S.CR(3)
                         row.sw.Color = row.color
                     elseif row.kind == "keybind" then
@@ -2133,7 +2152,7 @@ function S.setVisible(v)
     S.Capture.row = nil
     S.Focus.row = nil
     if not v then
-        for _, f in ipairs(S.Snow.flakes) do f.obj.Visible = false end
+        for _, f in ipairs(S.Snow.flakes) do for _, l in ipairs(f.lines) do l.Visible = false end end
         S.Snow.hidden = true
     end
     if v then
