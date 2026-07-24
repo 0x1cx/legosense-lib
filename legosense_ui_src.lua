@@ -29,7 +29,7 @@ S.Const.ALPHA_BG = 0.72
 S.Const.ALPHA_BAR = 0.72
 S.Const.ALPHA_CARD = 0.6
 S.Const.ALPHA_CTRL = 0.6
-S.Const.WAIFU_RATIO = 0.5625
+S.Const.IMG_RATIO = 0.5625
 -- nyan-cat background for the Rainbow theme. paste split-frame PNG urls (ezgif.com/split) into
 -- Const.NYAN_FRAMES to animate; with a single url it shows a static image. cached to disk per frame.
 S.Const.NYAN_URL = "https://api.alo.ne/file/f5g8xf"   -- source gif (fallback single frame)
@@ -276,10 +276,40 @@ function S.loadAvatar(applyFn)
     end)
 end
 
+-- theme background images (the Matcha character art, Columbina art, etc.), one per themed preset.
+-- cached in memory per preset so switching back never refetches; applied in relayout to decode.
+S.THEME_IMG = {
+    Matcha = "https://raw.githubusercontent.com/nvqren/Matcha-Waifu/refs/heads/main/waifu.png",
+    Columbina = "https://api.alo.ne/file/7uqcdu",
+}
+UI.themeImg = {}
+function S.loadThemeImage(preset)
+    local url = S.THEME_IMG[preset]
+    if not url then return end
+    if UI.themeImg[preset] then S.Win.dirty = true return end   -- already have it
+    task.spawn(function()
+        local path = S.FOLDER .. "/themeimg_" .. preset .. ".txt"
+        local data = nil
+        if isfile(path) then
+            local ok, d = pcall(readfile, path)
+            if ok and d and #d > 1000 then data = d end
+        end
+        if not data then
+            local ok, d = pcall(function() return game:HttpGet(url) end)
+            if ok and d and #d > 1000 then
+                data = d
+                if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
+                pcall(writefile, path, d)
+            end
+        end
+        if data then UI.themeImg[preset] = data S.Win.dirty = true end
+    end)
+end
+
 -- ========== shell ==========
 S.D = {}
 S.D.main    = S.New("Square", { Filled = true, Color = S.Theme.Bg, Transparency = S.Const.ALPHA_BG, ZIndex = 29, Corner = 8, Visible = true })
-S.D.waifu   = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = true })
+S.D.themeImg   = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = true })
 S.D.nyan    = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = false })
 S.D.topbar  = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 31, Corner = 8, Visible = true })
 S.D.sidebar = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 32, Corner = 8, Visible = true })
@@ -410,28 +440,7 @@ function S.startAssets()
         if data then pcall(function() S.D.logoImg.Data = data end) UI.logoLoaded = true S.Win.dirty = true end
     end)
 
-    task.spawn(function()
-        local path = S.FOLDER .. "/waifu.txt"
-        local data = nil
-        if isfile(path) then
-            local ok, d = pcall(readfile, path)
-            if ok and d and #d > 1000 then data = d end
-        end
-        if not data then
-            local ok, d = pcall(function()
-                return game:HttpGet("https://raw.githubusercontent.com/nvqren/Matcha-Waifu/refs/heads/main/waifu.png")
-            end)
-            if ok and d and #d > 1000 then
-                data = d
-                if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
-                pcall(writefile, path, d)
-            end
-        end
-        if data then
-            UI.waifuData = data     -- applied inside relayout so Position/Size touch it -> decode
-            S.Win.dirty = true
-        end
-    end)
+    S.loadThemeImage(S.Cfg.preset)   -- current theme's background image, if it has one
 
     -- nyan frames (or single gif) for the Rainbow theme
     UI.nyanData = {}
@@ -467,7 +476,7 @@ end
 -- grid and step. flakes also slowly rotate + twinkle, and fade near every edge so nothing pops.
 S.Snow = { flakes = {}, hidden = true }
 for i = 1, S.Const.SNOW_N do
-    local rad = 2.6 + (i % 4) * 0.9
+    local rad = 3.8 + (i % 4) * 1.2
     local lines = {}
     for k = 1, 3 do
         lines[k] = S.New("Line", { Color = S.BaseC1, Thickness = 1, Transparency = 0, ZIndex = 32, Visible = false })
@@ -1100,9 +1109,24 @@ end
 
 -- ========== settings page ==========
 S.Presets = {
-    Waifu = { c1 = S.C3(150, 205, 120), c2 = S.C3(195, 230, 130),
+    Matcha = { c1 = S.C3(150, 205, 120), c2 = S.C3(195, 230, 130),
         Dark = S.C3(14, 18, 11), Bg = S.C3(38, 44, 35), Panel = S.C3(42, 46, 37), PanelHov = S.C3(50, 54, 44),
         Control = S.C3(52, 57, 46), Track = S.C3(70, 74, 64), Header = S.C3(150, 172, 116) },
+    Columbina = { c1 = S.C3(220, 47, 126), c2 = S.C3(170, 77, 118),
+        Dark = S.C3(20, 22, 34), Bg = S.C3(31, 33, 50), Panel = S.C3(40, 42, 60), PanelHov = S.C3(48, 50, 70),
+        Control = S.C3(50, 52, 72), Track = S.C3(72, 74, 98), Header = S.C3(198, 130, 165) },
+    Violet = { c1 = S.C3(167, 120, 240), c2 = S.C3(196, 160, 250),
+        Dark = S.C3(16, 12, 24), Bg = S.C3(34, 28, 46), Panel = S.C3(42, 35, 56), PanelHov = S.C3(50, 42, 66),
+        Control = S.C3(52, 44, 68), Track = S.C3(74, 64, 92), Header = S.C3(170, 140, 210) },
+    Gold = { c1 = S.C3(240, 196, 90), c2 = S.C3(250, 220, 140),
+        Dark = S.C3(20, 17, 10), Bg = S.C3(44, 38, 26), Panel = S.C3(52, 45, 32), PanelHov = S.C3(60, 52, 38),
+        Control = S.C3(62, 54, 40), Track = S.C3(84, 74, 54), Header = S.C3(210, 180, 120) },
+    Crimson = { c1 = S.C3(232, 80, 80), c2 = S.C3(245, 130, 120),
+        Dark = S.C3(22, 12, 12), Bg = S.C3(46, 30, 30), Panel = S.C3(54, 36, 36), PanelHov = S.C3(64, 42, 42),
+        Control = S.C3(66, 44, 44), Track = S.C3(88, 60, 60), Header = S.C3(210, 130, 130) },
+    Aqua = { c1 = S.C3(80, 210, 210), c2 = S.C3(130, 235, 225),
+        Dark = S.C3(10, 20, 22), Bg = S.C3(28, 42, 44), Panel = S.C3(34, 50, 52), PanelHov = S.C3(40, 58, 60),
+        Control = S.C3(42, 60, 62), Track = S.C3(60, 82, 84), Header = S.C3(120, 190, 190) },
     Midnight = { c1 = S.C3(127, 178, 229), c2 = S.C3(156, 214, 240),
         Dark = S.C3(11, 14, 18), Bg = S.C3(33, 38, 46), Panel = S.C3(40, 46, 55), PanelHov = S.C3(47, 54, 64),
         Control = S.C3(48, 56, 66), Track = S.C3(64, 72, 84), Header = S.C3(122, 158, 198) },
@@ -1142,7 +1166,7 @@ end
 
 do
     local sTheme = S.addSection(S.SETTINGS_TAB, "THEME", "left")
-    S.addDropdown(sTheme, "Preset", { "Waifu", "Midnight", "Ember", "Mono", "Rainbow", "Custom" }, "Ember", "preset", function(v)
+    S.addDropdown(sTheme, "Preset", { "Matcha", "Columbina", "Midnight", "Ember", "Mono", "Violet", "Gold", "Crimson", "Aqua", "Rainbow", "Custom" }, "Ember", "preset", function(v)
         S.Cfg.preset = v
         local p = S.Presets[v]
         if p then
@@ -1150,6 +1174,7 @@ do
             if S.rColor1 then S.rColor1.color = p.c1 end
             if S.rColor2 then S.rColor2.color = p.c2 end
         end
+        S.loadThemeImage(v)
         S.markChanged()
     end).tip = "Pick a look, Rainbow to cycle, or Custom for your own colours"
     S.rColor1 = S.addColor(sTheme, "Color 1", S.BaseC1, "color1", function(c) S.Theme.C1 = c S.Cfg.preset = "Custom" S.Win.dirty = true S.markChanged() end)
@@ -1437,21 +1462,23 @@ function S.relayoutRaw()
 
     local cx = x + sw + S.PAD
     local cw = w - sw - S.PAD * 2 - 8
-    -- waifu art: bounded by sidebar + topbar, centered in content
+    -- theme background art: bounded by sidebar + topbar, centered in content
     do
         local artH = h - S.TB - 4
-        local artW = math.floor(artH * S.Const.WAIFU_RATIO)
+        local artW = math.floor(artH * S.Const.IMG_RATIO)
         if artW > cw then
             artW = cw
-            artH = math.floor(artW / S.Const.WAIFU_RATIO)
+            artH = math.floor(artW / S.Const.IMG_RATIO)
         end
-        S.D.waifu.Visible = S.Win.visible and S.Cfg.preset == "Waifu"
-        if UI.waifuData and not UI.waifuApplied then
-            pcall(function() S.D.waifu.Data = UI.waifuData end)
-            UI.waifuApplied = true
+        local imgData = UI.themeImg[S.Cfg.preset]
+        S.D.themeImg.Visible = S.Win.visible and imgData ~= nil
+        -- (re)apply Data whenever the applied theme differs, then touch Position/Size -> decode
+        if imgData and UI.themeImgApplied ~= S.Cfg.preset then
+            pcall(function() S.D.themeImg.Data = imgData end)
+            UI.themeImgApplied = S.Cfg.preset
         end
-        S.D.waifu.Position = Vector2.new(cx + math.floor((cw - artW) / 2), y + S.TB + 2)
-        S.D.waifu.Size = Vector2.new(artW, artH)
+        S.D.themeImg.Position = Vector2.new(cx + math.floor((cw - artW) / 2), y + S.TB + 2)
+        S.D.themeImg.Size = Vector2.new(artW, artH)
         -- nyan background fills the content area on the Rainbow theme
         S.D.nyan.Visible = S.Win.visible and S.Cfg.preset == "Rainbow" and UI.nyanData0 ~= nil
         if UI.nyanData0 and not UI.nyanApplied then
@@ -3203,6 +3230,7 @@ function S.Library:CreateWindow(opts)
     end
     S.startAssets()
     S.loadPersisted()
+    S.loadThemeImage(S.Cfg.preset)   -- force the active theme's bg image once, after config load
     UI.created = true
     S.setVisible(true)
     S.relayout()
