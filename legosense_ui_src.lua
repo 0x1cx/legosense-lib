@@ -284,11 +284,19 @@ S.THEME_IMG = {
 }
 UI.themeImg = {}
 UI.themeImgRatio = {}   -- preset -> width/height, read from the PNG so it never stretches
--- read width/height from a PNG's IHDR chunk (bytes 17-24, big-endian) -> aspect ratio
-local function pngRatio(d)
+-- aspect ratio (w/h) from image header. handles PNG (IHDR, big-endian at byte 17/21) and
+-- GIF (logical screen descriptor, little-endian at byte 7/9).
+local function imgRatio(d)
     if type(d) ~= "string" or #d < 24 then return nil end
-    local function be(a) return string.byte(d, a) * 16777216 + string.byte(d, a+1) * 65536 + string.byte(d, a+2) * 256 + string.byte(d, a+3) end
-    local w, h = be(17), be(21)
+    local b = string.byte
+    local w, h
+    if b(d, 1) == 0x89 and b(d, 2) == 0x50 then          -- PNG
+        w = b(d, 17) * 16777216 + b(d, 18) * 65536 + b(d, 19) * 256 + b(d, 20)
+        h = b(d, 21) * 16777216 + b(d, 22) * 65536 + b(d, 23) * 256 + b(d, 24)
+    elseif b(d, 1) == 71 and b(d, 2) == 73 and b(d, 3) == 70 then   -- "GIF"
+        w = b(d, 7) + b(d, 8) * 256
+        h = b(d, 9) + b(d, 10) * 256
+    end
     if w and h and w > 0 and h > 0 then return w / h end
     return nil
 end
@@ -313,7 +321,12 @@ function S.loadThemeImage(preset)
         end
         if data then
             UI.themeImg[preset] = data
-            UI.themeImgRatio[preset] = pngRatio(data) or S.Const.IMG_RATIO
+            UI.themeImgRatio[preset] = imgRatio(data) or S.Const.IMG_RATIO
+            -- set Data directly here (like the logo/icons, which load fine) not deferred to relayout
+            if S.Cfg.preset == preset then
+                pcall(function() S.D.themeImg.Data = data end)
+                UI.themeImgApplied = preset
+            end
             S.Win.dirty = true
         end
     end)
@@ -477,6 +490,7 @@ function S.startAssets()
             if data then
                 UI.nyanData[i] = data
                 if not UI.nyanData0 then UI.nyanData0 = data end
+                if i == 1 then UI.nyanRatio = imgRatio(data) or 1 end
                 S.Win.dirty = true
             end
         end)
@@ -1354,6 +1368,10 @@ function S.relayoutRaw()
 
     S.D.sidebar.Color = S.Theme.Dark
     S.D.topbar.Color = S.Theme.Dark
+    -- Rainbow theme: sidebar + topbar both at a matching 0.9 so the busy bg reads cleaner
+    local barA = (S.Cfg.preset == "Rainbow") and 0.9 or S.Const.ALPHA_BAR
+    S.D.sidebar.Transparency = barA * S.Cfg.opacity
+    S.D.topbar.Transparency = barA * S.Cfg.opacity
     S.D.search.Color = S.Theme.Panel
     S.D.avCirc.Color = S.Theme.Control
     S.D.logo.Position = Vector2.new(x + 12, y + 6)
@@ -1497,16 +1515,23 @@ function S.relayoutRaw()
         end
         S.D.themeImg.Position = Vector2.new(cx + math.floor((cw - artW) / 2), y + S.TB + 2)
         S.D.themeImg.Size = Vector2.new(artW, artH)
-        -- nyan background fills the content area on the Rainbow theme
+        -- nyan background on the Rainbow theme, fit to its real aspect ratio (never stretched)
         S.D.nyan.Visible = S.Win.visible and S.Cfg.preset == "Rainbow" and UI.nyanData0 ~= nil
         if UI.nyanData0 and not UI.nyanApplied then
             pcall(function() S.D.nyan.Data = UI.nyanData0 end)
             UI.nyanApplied = true
             UI.nyanCur = 1
         end
-        UI.nyanRect = { x = cx, y = y + S.TB + 2, w = cw, h = h - S.TB - 6 }
-        S.D.nyan.Position = Vector2.new(cx, y + S.TB + 2)
-        S.D.nyan.Size = Vector2.new(cw, h - S.TB - 6)
+        local nRatio = UI.nyanRatio or 1
+        local nMaxH, nMaxW = h - S.TB - 6, cw
+        local nW, nH = nMaxH * nRatio, nMaxH
+        if nW > nMaxW then nW = nMaxW nH = nMaxW / nRatio end
+        nW, nH = math.floor(nW), math.floor(nH)
+        local nX = cx + math.floor((cw - nW) / 2)
+        local nY = y + S.TB + 2 + math.floor(((h - S.TB - 6) - nH) / 2)
+        UI.nyanRect = { x = nX, y = nY, w = nW, h = nH }
+        S.D.nyan.Position = Vector2.new(nX, nY)
+        S.D.nyan.Size = Vector2.new(nW, nH)
     end
     local page = S.Pages[S.activeTab]
 
