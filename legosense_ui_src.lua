@@ -322,11 +322,8 @@ function S.loadThemeImage(preset)
         if data then
             UI.themeImg[preset] = data
             UI.themeImgRatio[preset] = imgRatio(data) or S.Const.IMG_RATIO
-            -- set Data directly here (like the logo/icons, which load fine) not deferred to relayout
-            if S.Cfg.preset == preset then
-                pcall(function() S.D.themeImg.Data = data end)
-                UI.themeImgApplied = preset
-            end
+            -- force re-apply on the next relayout (it sets Size before Data so decode works)
+            if S.Cfg.preset == preset then UI.themeImgApplied = nil end
             S.Win.dirty = true
         end
     end)
@@ -335,7 +332,7 @@ end
 -- ========== shell ==========
 S.D = {}
 S.D.main    = S.New("Square", { Filled = true, Color = S.Theme.Bg, Transparency = S.Const.ALPHA_BG, ZIndex = 29, Corner = 8, Visible = true })
-S.D.themeImg   = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = true })
+S.D.themeImg   = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = false, Size = Vector2.new(300, 300) })
 S.D.nyan    = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = false })
 S.D.topbar  = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 31, Corner = 8, Visible = true })
 S.D.sidebar = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 32, Corner = 8, Visible = true })
@@ -1507,14 +1504,18 @@ function S.relayoutRaw()
         end
         artW, artH = math.floor(artW), math.floor(artH)
         local imgData = UI.themeImg[S.Cfg.preset]
+        local artX = cx + math.floor((cw - artW) / 2)
+        local artY = y + S.TB + 2
+        -- geometry stored so the crude post-load forcer can re-apply exact rect
+        UI.themeImgRect = { x = artX, y = artY, w = artW, h = artH }
         S.D.themeImg.Visible = S.Win.visible and imgData ~= nil
-        -- (re)apply Data whenever the applied theme differs, then touch Position/Size -> decode
+        -- Size/Position MUST be set before Data or Matcha's Image never decodes on start
+        S.D.themeImg.Position = Vector2.new(artX, artY)
+        S.D.themeImg.Size = Vector2.new(artW, artH)
         if imgData and UI.themeImgApplied ~= S.Cfg.preset then
             pcall(function() S.D.themeImg.Data = imgData end)
             UI.themeImgApplied = S.Cfg.preset
         end
-        S.D.themeImg.Position = Vector2.new(cx + math.floor((cw - artW) / 2), y + S.TB + 2)
-        S.D.themeImg.Size = Vector2.new(artW, artH)
         -- nyan background on the Rainbow theme, fit to its real aspect ratio (never stretched)
         S.D.nyan.Visible = S.Win.visible and S.Cfg.preset == "Rainbow" and UI.nyanData0 ~= nil
         if UI.nyanData0 and not UI.nyanApplied then
@@ -3277,6 +3278,29 @@ function S.Library:CreateWindow(opts)
     UI.created = true
     S.setVisible(true)
     S.relayout()
+    -- crude forcer: poll for a few seconds after load and hard-apply the theme image once its
+    -- data arrives (Size before Data, then Visible toggle) so it always shows up on start.
+    task.spawn(function()
+        local forced = {}
+        for _ = 1, 30 do
+            local key = S.Cfg.preset
+            local data = S.THEME_IMG[key] and UI.themeImg[key]
+            local r = UI.themeImgRect
+            if data and r and not forced[key] then
+                pcall(function()
+                    S.D.themeImg.Visible = false
+                    S.D.themeImg.Size = Vector2.new(r.w, r.h)
+                    S.D.themeImg.Position = Vector2.new(r.x, r.y)
+                    S.D.themeImg.Data = data
+                    S.D.themeImg.Visible = S.Win.visible
+                end)
+                UI.themeImgApplied = key
+                forced[key] = true
+                S.Win.dirty = true
+            end
+            task.wait(0.15)
+        end
+    end)
     return S.Library
 end
 
