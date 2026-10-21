@@ -1347,6 +1347,10 @@ do
             S.applyPreset(v)
             if S.rColor1 then S.rColor1.color = p.c1 end
             if S.rColor2 then S.rColor2.color = p.c2 end
+            -- background swatch and snow colour follow the preset too
+            if S.rBg then S.rBg.color = p.Bg end
+            S.Cfg.fxColor = p.c1
+            if S.rFx then S.rFx.color = p.c1 end
         end
         S.loadThemeImage(v)
         S.markChanged()
@@ -1358,11 +1362,11 @@ do
     rSpeed.showT = (S.Cfg.preset == "Rainbow") and 1 or 0
 
     local sApp = S.addSection(S.SETTINGS_TAB, "APPEARANCE", "left")
-    S.addColor(sApp, "Background", S.Theme.Bg, "bgColor", function(c) S.Theme.Bg = c S.Win.dirty = true S.markChanged() end)
+    S.rBg = S.addColor(sApp, "Background", S.Theme.Bg, "bgColor", function(c) S.Theme.Bg = c S.Win.dirty = true S.markChanged() end)
     S.addColor(sApp, "Text color", S.Theme.Text, "textColor", function(c) S.Theme.Text = c S.Win.dirty = true S.markChanged() end)
     S.addSlider(sApp, "Card glow", 0, 200, 60, " %", "cardGlow", function(v) S.Cfg.cardGlow = v S.markChanged() end).tip = "Accent glow around section cards"
     S.addDropdown(sApp, "Background FX", { "Off", "Snow" }, "Snow", "bgFx", function(v) S.Cfg.bgFx = v S.markChanged() end).tip = "Sparkles drifting inside the menu"
-    S.addColor(sApp, "FX colour", S.BaseC1, "fxColor", function(c) S.Cfg.fxColor = c S.markChanged() end)
+    S.rFx = S.addColor(sApp, "FX colour", S.BaseC1, "fxColor", function(c) S.Cfg.fxColor = c S.markChanged() end)
     S.addSlider(sApp, "Corner radius", 0, 200, 100, " %", "cornerRadius", function(v) S.Cfg.cornerRadius = v S.Win.dirty = true S.markChanged() end)
     S.addDivider(sApp, "Misc")
     S.addToggle(sApp, "Performance mode", false, "perfMode", function(v) S.Cfg.perfMode = v S.Win.dirty = true S.markChanged() end).tip = "Turns off animations, hover fades, snow, rainbow cycling and scroll glow"
