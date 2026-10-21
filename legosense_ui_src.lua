@@ -100,7 +100,7 @@ S.Env = _G.FALUI_ENV
 -- GET that works on Matcha (game:HttpGet / httpget) and on regular executors (request fallbacks).
 -- Callers pcall it; it returns the body string or errors.
 function S.httpGet(url)
-    local ok, body = pcall(function() return S.httpGet(url) end)
+    local ok, body = pcall(function() return game:HttpGet(url) end)
     if ok and type(body) == "string" then return body end
     if type(httpget) == "function" then return httpget(url) end
     local req = (type(request) == "function" and request) or (type(http_request) == "function" and http_request)
@@ -1704,7 +1704,7 @@ function S.relayoutRaw()
         if page.scrollY < 0 then page.scrollY = 0 end
         if page.scrollY > preMax then page.scrollY = preMax end
         local startY = y + S.TB + 16 - page.scrollCur
-        local colGap = 12
+        local colGap = 22
         local colW = math.floor((cw - colGap) / 2)
         local colX = { left = cx, right = cx + colW + colGap }
         local colY = { left = startY, right = startY }
@@ -1893,7 +1893,7 @@ function S.relayoutRaw()
                 end
                 ry = ry + S.rowEffH(row) * colTs
             end
-            colY[sec.side] = ry + 18
+            colY[sec.side] = ry + 30
         end
 
         -- scroll bookkeeping
@@ -2840,9 +2840,10 @@ function S.frame()
             S.buildSearch()
             S.Win.dirty = true
             consumed = true
-        elseif S.Search.active and S.Search.geom then
+        elseif S.Search.active then
+            -- geom is nil while there are no results; any outside click must still blur the field
             local g = S.Search.geom
-            if S.inRect(S.In.x, S.In.y, g.px, g.py, g.pw, g.n * g.rowH + 8) then
+            if g and S.inRect(S.In.x, S.In.y, g.px, g.py, g.pw, g.n * g.rowH + 8) then
                 local i = math.floor((S.In.y - (g.py + 4)) / g.rowH) + 1
                 if S.Search.results[i] then S.gotoResult(S.Search.results[i]) end
                 consumed = true
