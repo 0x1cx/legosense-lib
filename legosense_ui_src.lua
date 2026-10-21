@@ -146,12 +146,12 @@ function S.cfgDir() return S.FOLDER .. "/" .. S.CFGSUB end
 S.Const = {}
 
 function S.C3(r, g, b) return Color3.fromRGB(r, g, b) end
-S.BaseC1 = S.C3(229, 151, 95)
-S.BaseC2 = S.C3(240, 201, 121)
+S.BaseC1 = S.C3(228, 230, 234)
+S.BaseC2 = S.C3(176, 180, 188)
 S.Theme = {
-    Dark = S.C3(18, 14, 11), Bg = S.C3(44, 38, 33), Panel = S.C3(52, 45, 38), PanelHov = S.C3(60, 52, 44),
-    Control = S.C3(62, 54, 45), Track = S.C3(82, 72, 61), C1 = S.BaseC1, C2 = S.BaseC2,
-    Header = S.C3(196, 152, 110), Text = S.C3(219, 225, 211), Dim = S.C3(130, 137, 118),
+    Dark = S.C3(13, 14, 16), Bg = S.C3(34, 35, 38), Panel = S.C3(43, 44, 48), PanelHov = S.C3(52, 53, 58),
+    Control = S.C3(54, 55, 60), Track = S.C3(78, 80, 86), C1 = S.BaseC1, C2 = S.BaseC2,
+    Header = S.C3(190, 193, 200), Text = S.C3(219, 225, 211), Dim = S.C3(130, 137, 118),
     Knob = S.C3(245, 248, 240), White = S.C3(255, 255, 255),
 }
 S.Const.ALPHA_BG = 0.72
@@ -190,7 +190,7 @@ S.Cfg = {
     tabLayout = "Sidebar", search = "Bar", font = "UI",
     notifyTime = 5, menuKey = 0x24, keybindOverlay = false,
     cardGlow = 60, bgFx = "Snow", border = 0, frost = 0, cornerRadius = 100,
-    perfMode = false, smartFps = false, preset = "Ember",
+    perfMode = false, preset = "Mono",
     autoSave = true, autoLoad = "none", fxColor = S.BaseC1,
 }
 S.FontIds = { UI = 0, System = 1, SystemBold = 2, Minecraft = 4, Monospace = 5, Pixel = 7 }
@@ -1340,7 +1340,7 @@ end
 
 do
     local sTheme = S.addSection(S.SETTINGS_TAB, "THEME", "left")
-    S.addDropdown(sTheme, "Preset", { "Matcha", "Columbina", "Midnight", "Ember", "Mono", "Violet", "Gold", "Crimson", "Aqua", "Rainbow", "Custom" }, "Ember", "preset", function(v)
+    S.addDropdown(sTheme, "Preset", { "Matcha", "Columbina", "Midnight", "Ember", "Mono", "Violet", "Gold", "Crimson", "Aqua", "Rainbow", "Custom" }, "Mono", "preset", function(v)
         S.Cfg.preset = v
         local p = S.Presets[v]
         if p then
@@ -1366,7 +1366,6 @@ do
     S.addSlider(sApp, "Corner radius", 0, 200, 100, " %", "cornerRadius", function(v) S.Cfg.cornerRadius = v S.Win.dirty = true S.markChanged() end)
     S.addDivider(sApp, "Misc")
     S.addToggle(sApp, "Performance mode", false, "perfMode", function(v) S.Cfg.perfMode = v S.Win.dirty = true S.markChanged() end).tip = "Turns off animations, hover fades, snow, rainbow cycling and scroll glow"
-    S.addToggle(sApp, "Smart FPS", false, "smartFps", function(v) S.Cfg.smartFps = v S.markChanged() end)
 
     local sIface = S.addSection(S.SETTINGS_TAB, "INTERFACE", "right")
     S.addKeybind(sIface, "Menu key", 0x24, "menuKey", function(vk) S.Cfg.menuKey = vk S.markChanged() end)

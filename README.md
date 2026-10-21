@@ -103,11 +103,11 @@ Library.Flags                     -- raw table of flag -> row
 
 ## Theming
 
-- Presets: `Waifu`, `Midnight`, `Ember` (default), `Mono`, `Rainbow`, `Custom`.
+- Presets: `Mono` (default), `Matcha`, `Columbina`, `Midnight`, `Ember`, `Violet`, `Gold`, `Crimson`, `Aqua`, `Rainbow`, `Custom`.
 - `Rainbow` cycles the accent + sidebar/topbar over a Mono-white base; a **Rainbow speed** slider appears only while it's selected.
 
 ```lua
-Library:SetPreset("Ember")
+Library:SetPreset("Mono")
 ```
 
 Fine-grained theme controls (Color 1/2, Background, Text color, Card glow, Corner radius, FX, fonts, etc.) live in the Settings tab.
