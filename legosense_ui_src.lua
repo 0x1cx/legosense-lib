@@ -1,8 +1,137 @@
+-- ========== ENVIRONMENT ==========
+-- Matcha is the only non-standard runtime: its quirks (top-level `return` dropped by loadstring,
+-- Matcha-only Drawing props like Corner/Rounding, notify(message, title, duration)) are handled
+-- where they matter. Everything else is treated as regular Roblox Luau, and any executor globals
+-- it lacks are filled in here. Whether the UI renders depends only on a working Drawing library:
+-- without one the library runs headless (flags, configs and callbacks work, nothing is drawn).
+-- Must stay at the top of the file. Wrapped in do...end to keep its locals out of the register budget.
+do
+    local env = { matcha = false, executor = nil, version = nil, drawing = false, filesystem = false, input = false }
+
+    local okId, name, ver = pcall(function() return identifyexecutor() end)
+    if okId and type(name) == "string" then env.executor, env.version = name, ver end
+    env.matcha = env.executor == "Matcha"
+
+    local okD, dnew = pcall(function() return Drawing.new end)
+    env.drawing = okD and type(dnew) == "function"
+    env.filesystem = type(isfile) == "function" and type(readfile) == "function" and type(writefile) == "function"
+    env.input = type(iskeypressed) == "function" and type(ismouse1pressed) == "function"
+
+    -- filesystem: no-ops when missing (every library call site is pcall'd)
+    if not env.filesystem then
+        isfile     = isfile     or function() return false end
+        isfolder   = isfolder   or function() return false end
+        readfile   = readfile   or function(p) error("[legosense] no filesystem: cannot read " .. tostring(p)) end
+        writefile  = writefile  or function() end
+        appendfile = appendfile or function() end
+        makefolder = makefolder or function() end
+        delfile    = delfile    or function() end
+    end
+
+    -- input: Windows VK codes -> UserInputService, only for globals the executor doesn't provide
+    if not env.input then
+        local okU, UIS = pcall(function() return game:GetService("UserInputService") end)
+        local function mouseDown(t)
+            if not okU then return false end
+            local ok, d = pcall(UIS.IsMouseButtonPressed, UIS, t)
+            return ok and d
+        end
+        if type(ismouse1pressed) ~= "function" then ismouse1pressed = function() return mouseDown(Enum.UserInputType.MouseButton1) end end
+        if type(ismouse2pressed) ~= "function" then ismouse2pressed = function() return mouseDown(Enum.UserInputType.MouseButton2) end end
+        if type(iskeypressed) ~= "function" then
+            local KC = Enum.KeyCode
+            local VK = {
+                [0x08] = KC.Backspace, [0x09] = KC.Tab,         [0x0D] = KC.Return,
+                [0x10] = KC.LeftShift, [0x11] = KC.LeftControl, [0x12] = KC.LeftAlt,
+                [0x1B] = KC.Escape,    [0x20] = KC.Space,
+                [0x21] = KC.PageUp,    [0x22] = KC.PageDown,    [0x23] = KC.End,   [0x24] = KC.Home,
+                [0x25] = KC.Left,      [0x26] = KC.Up,          [0x27] = KC.Right, [0x28] = KC.Down,
+                [0x2D] = KC.Insert,    [0x2E] = KC.Delete,
+                [0xBD] = KC.Minus,     [0xBE] = KC.Period,      [0xBF] = KC.Slash, [0xDE] = KC.Quote,
+            }
+            local digits = { "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine" }
+            for i = 0, 9 do VK[0x30 + i] = KC[digits[i + 1]] end
+            for i = 0x41, 0x5A do VK[i] = KC[string.char(i)] end
+            for i = 0x70, 0x7B do VK[i] = KC["F" .. (i - 0x6F)] end
+            iskeypressed = function(vk)
+                if vk == 0x01 then return ismouse1pressed() end
+                if vk == 0x02 then return ismouse2pressed() end
+                if vk == 0x04 then return mouseDown(Enum.UserInputType.MouseButton3) end
+                local kc = VK[vk]
+                if not (okU and kc) then return false end
+                local ok, d = pcall(UIS.IsKeyDown, UIS, kc)
+                return ok and d
+            end
+        end
+    end
+    if type(setrobloxinput) ~= "function" then setrobloxinput = function() end end
+
+    -- no Drawing library -> inert stand-ins so the library boots headless
+    if not env.drawing then
+        -- stand-ins stay invisible (so per-frame clipping skips them) and report zero-size geometry
+        local VEC = { Position = true, Size = true, From = true, To = true, PointA = true, PointB = true, PointC = true, TextBounds = true, ImageSize = true }
+        local stubMeta = {
+            __index = function(_, k)
+                if k == "Remove" or k == "Destroy" then return function() end end
+                if k == "Visible" then return false end
+                if VEC[k] then return Vector2.new(0, 0) end
+                return nil
+            end,
+            __newindex = function(self, k, v)
+                if k ~= "Visible" and not VEC[k] then rawset(self, k, v) end
+            end,
+        }
+        Drawing = { new = function(t) return setmetatable({ _type = t }, stubMeta) end, Fonts = { UI = 0, System = 1, Plex = 2, Monospace = 3 } }
+        warn("[legosense] no Drawing library - running headless (flags/config only)")
+    end
+
+    _G.FALUI_ENV = env
+end
+-- ========== END ENVIRONMENT ==========
+
 -- FALUI :: STEP 14 -- per-pixel scrollbar glow, wider sidebar, grip lines, darker bars
 -- Run standalone in Matcha: loadstring(readfile(FOLDER .. "/step14.lua"))()
 if _G.FALUI and _G.FALUI.Unload then pcall(_G.FALUI.Unload) end
 
 local S = {}
+
+S.Env = _G.FALUI_ENV
+
+-- GET that works on Matcha (game:HttpGet / httpget) and on regular executors (request fallbacks).
+-- Callers pcall it; it returns the body string or errors.
+function S.httpGet(url)
+    local ok, body = pcall(function() return S.httpGet(url) end)
+    if ok and type(body) == "string" then return body end
+    if type(httpget) == "function" then return httpget(url) end
+    local req = (type(request) == "function" and request) or (type(http_request) == "function" and http_request)
+        or (type(syn) == "table" and syn.request)
+    if req then
+        local r = req({ Url = url, Method = "GET" })
+        return r and r.Body
+    end
+    return game:GetService("HttpService"):GetAsync(url)
+end
+
+-- Matcha supports every Drawing prop the library writes. Other executors may not have the
+-- Matcha-only ones (Corner, Rounding, ...): there each object is wrapped so a failing write is
+-- dropped and never retried, instead of erroring every frame and killing relayout.
+S.BadProps = {}
+function S.wrapDrawing(o, t)
+    local bad = S.BadProps[t]
+    if not bad then bad = {} S.BadProps[t] = bad end
+    return setmetatable({}, {
+        __index = function(_, k)
+            local ok, v = pcall(function() return o[k] end)
+            if not ok then return nil end
+            if type(v) == "function" then return function(_, ...) return v(o, ...) end end
+            return v
+        end,
+        __newindex = function(_, k, v)
+            if bad[k] then return end
+            if not pcall(function() o[k] = v end) then bad[k] = true end
+        end,
+    })
+end
 
 local UI = { Objects = {}, Version = "step14", WheelConns = {} }
 _G.FALUI = UI
@@ -91,6 +220,7 @@ end
 function S.New(t, props)
     local ok, o = pcall(Drawing.new, t)
     if not ok then print("FALUI|create fail " .. t .. ": " .. tostring(o)) return nil end
+    if S.Env.drawing and not S.Env.matcha then o = S.wrapDrawing(o, t) end
     for k, v in pairs(props) do
         local okP, e = pcall(function() o[k] = v end)
         if not okP then print("FALUI|" .. t .. "." .. k .. " set fail: " .. tostring(e)) end
@@ -206,6 +336,11 @@ function S.inRect(px, py, rx, ry, rw, rh)
     return px >= rx and px <= rx + rw and py >= ry and py <= ry + rh
 end
 
+-- Performance mode switches off everything that costs per-frame work: easing animations, hover
+-- easing, snow particles, nyan frame swaps, the per-pixel scroll glow and rainbow cycling
+-- (which forces a full relayout every frame).
+function S.animOn() return S.Cfg.animations and not S.Cfg.perfMode end
+function S.hoverOn() return S.Cfg.hoverFx and not S.Cfg.perfMode end
 function S.CR(px) return math.max(0, math.floor(px * S.Cfg.cornerRadius / 100 + 0.5)) end
 
 function S.setOpacity(f)
@@ -241,7 +376,7 @@ function S.loadIcon(name, applyFn)
             if ok and d and #d > 100 then data = d end
         end
         if not data then
-            local ok, d = pcall(function() return game:HttpGet(S.ICON_URL .. name .. ".png") end)
+            local ok, d = pcall(function() return S.httpGet(S.ICON_URL .. name .. ".png") end)
             if ok and d and #d > 100 then
                 data = d
                 if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
@@ -263,12 +398,12 @@ function S.loadAvatar(applyFn)
         local okId, uid = pcall(function() return game:GetService("Players").LocalPlayer.UserId end)
         if not okId then return end
         local okJ, j = pcall(function()
-            return game:HttpGet("https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" .. tostring(uid) .. "&size=48x48&format=Png&isCircular=false")
+            return S.httpGet("https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" .. tostring(uid) .. "&size=48x48&format=Png&isCircular=false")
         end)
         if not okJ or not j then return end
         local url = tostring(j):match('"imageUrl"%s*:%s*"([^"]+)"')
         if not url then return end
-        local okP, png = pcall(function() return game:HttpGet(url) end)
+        local okP, png = pcall(function() return S.httpGet(url) end)
         if okP and png and #png > 100 then
             pcall(writefile, path, png)
             pcall(applyFn, png)
@@ -312,7 +447,7 @@ function S.loadThemeImage(preset)
             if ok and d and #d > 1000 then data = d end
         end
         if not data then
-            local ok, d = pcall(function() return game:HttpGet(url) end)
+            local ok, d = pcall(function() return S.httpGet(url) end)
             if ok and d and #d > 1000 then
                 data = d
                 if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
@@ -424,11 +559,11 @@ function S.startAssets()
         local ok, info = pcall(function() return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId) end)
         if ok and info and info.Name then S.GameName = tostring(info.Name) S.Win.dirty = true return end
         local okU, uj = pcall(function()
-            return game:HttpGet("https://apis.roblox.com/universes/v1/places/" .. tostring(game.PlaceId) .. "/universe")
+            return S.httpGet("https://apis.roblox.com/universes/v1/places/" .. tostring(game.PlaceId) .. "/universe")
         end)
         local uid = okU and tostring(uj):match('"universeId"%s*:%s*(%d+)') or nil
         if uid then
-            local okG, gj = pcall(function() return game:HttpGet("https://games.roblox.com/v1/games?universeIds=" .. uid) end)
+            local okG, gj = pcall(function() return S.httpGet("https://games.roblox.com/v1/games?universeIds=" .. uid) end)
             local nm = okG and tostring(gj):match('"name"%s*:%s*"([^"]-)"') or nil
             if nm then S.GameName = nm S.Win.dirty = true end
         end
@@ -442,7 +577,7 @@ function S.startAssets()
         if type(S.WinIcon) == "string" and #S.WinIcon > 0 then url = S.WinIcon usingCustom = true
         elseif type(S.WinIcon) == "number" then
             usingCustom = true
-            local okT, tj = pcall(function() return game:HttpGet("https://thumbnails.roblox.com/v1/assets?assetIds=" .. tostring(S.WinIcon) .. "&size=150x150&format=Png&isCircular=false") end)
+            local okT, tj = pcall(function() return S.httpGet("https://thumbnails.roblox.com/v1/assets?assetIds=" .. tostring(S.WinIcon) .. "&size=150x150&format=Png&isCircular=false") end)
             url = (okT and tostring(tj):match('"imageUrl"%s*:%s*"([^"]+)"')) or S.LOGO_URL
         end
         local data = nil
@@ -451,7 +586,7 @@ function S.startAssets()
             if ok and d and #d > 200 then data = d end
         end
         if not data then
-            local ok, d = pcall(function() return game:HttpGet(url) end)
+            local ok, d = pcall(function() return S.httpGet(url) end)
             if ok and d and #d > 200 then
                 data = d
                 if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
@@ -477,7 +612,7 @@ function S.startAssets()
                 if ok and d and #d > 200 then data = d end
             end
             if not data then
-                local ok, d = pcall(function() return game:HttpGet(url) end)
+                local ok, d = pcall(function() return S.httpGet(url) end)
                 if ok and d and #d > 200 then
                     data = d
                     if not isfolder(S.FOLDER) then pcall(makefolder, S.FOLDER) end
@@ -516,7 +651,7 @@ for i = 1, S.Const.SNOW_N do
 end
 
 function S.updateSnow(dt, t)
-    local on = S.Win.visible and S.Cfg.bgFx == "Snow"
+    local on = S.Win.visible and S.Cfg.bgFx == "Snow" and not S.Cfg.perfMode
     if not on then
         if not S.Snow.hidden then
             for _, f in ipairs(S.Snow.flakes) do for _, l in ipairs(f.lines) do l.Visible = false end end
@@ -740,8 +875,16 @@ function S.addSection(tabIdx, title, side)
     return sec
 end
 
+-- every value loaded from settings/config, kept so flags created AFTER CreateWindow (the normal
+-- order: CreateWindow, then tabs/controls) still pick up their saved value when they register
+S.Persisted = {}
 function S.regFlag(row, flag)
-    if flag then row.flag = flag S.FlagRows[flag] = row end
+    if flag then
+        row.flag = flag
+        S.FlagRows[flag] = row
+        local v = S.Persisted[flag]
+        if v ~= nil then S.applyRow(row, v) end
+    end
     return row
 end
 
@@ -989,9 +1132,13 @@ end
 function S.jsonDecode(txt)
     if type(txt) ~= "string" or #txt == 0 then return nil end
     if txt:match("^%s*return") then -- legacy Lua configs still load
-        local ok, chunk = pcall(loadstring, txt)
-        if ok and chunk then local ok2, d = pcall(chunk) if ok2 and type(d) == "table" then return d end end
-        return nil
+        -- Matcha's loadstring drops a chunk's return values, so hand the table out via a global
+        _G.__FALUI_LEGACY = nil
+        local ok, chunk = pcall(loadstring, "_G.__FALUI_LEGACY = (function()\n" .. txt .. "\nend)()")
+        if ok and chunk then pcall(chunk) end
+        local d = _G.__FALUI_LEGACY
+        _G.__FALUI_LEGACY = nil
+        return type(d) == "table" and d or nil
     end
     return S.jsonParse(txt)
 end
@@ -1015,6 +1162,8 @@ end
 S.THEME_KEYS = { "Dark", "Bg", "Panel", "PanelHov", "Control", "Track", "Header", "C1", "C2", "Text" }
 function S.snapshot()
     local t = { w = S.Win.w, h = S.Win.h, x = S.Win.x, y = S.Win.y }
+    -- keep saved values for flags this session never created, so autosave doesn't wipe them
+    for flag, v in pairs(S.Persisted) do t[flag] = v end
     for flag, row in pairs(S.FlagRows) do
         local v = S.flagValue(row)
         if v ~= nil then t[flag] = v end
@@ -1066,6 +1215,7 @@ function S.loadSnapshot(txt)
     if type(data.y) == "number" then S.Win.y = data.y end
     local ordered = {}
     for flag, v in pairs(data) do
+        if flag ~= "theme" and flag ~= "w" and flag ~= "h" and flag ~= "x" and flag ~= "y" then S.Persisted[flag] = v end
         if S.FlagRows[flag] then table.insert(ordered, flag) end
     end
     table.sort(ordered, function(a, b)
@@ -1215,7 +1365,7 @@ do
     S.addColor(sApp, "FX colour", S.BaseC1, "fxColor", function(c) S.Cfg.fxColor = c S.markChanged() end)
     S.addSlider(sApp, "Corner radius", 0, 200, 100, " %", "cornerRadius", function(v) S.Cfg.cornerRadius = v S.Win.dirty = true S.markChanged() end)
     S.addDivider(sApp, "Misc")
-    S.addToggle(sApp, "Performance mode", false, "perfMode", function(v) S.Cfg.perfMode = v S.markChanged() end)
+    S.addToggle(sApp, "Performance mode", false, "perfMode", function(v) S.Cfg.perfMode = v S.Win.dirty = true S.markChanged() end).tip = "Turns off animations, hover fades, snow, rainbow cycling and scroll glow"
     S.addToggle(sApp, "Smart FPS", false, "smartFps", function(v) S.Cfg.smartFps = v S.markChanged() end)
 
     local sIface = S.addSection(S.SETTINGS_TAB, "INTERFACE", "right")
@@ -2008,9 +2158,9 @@ function S.updateControls(dt, mx, my)
     S.animClock = S.animClock + dt
     local page = S.Pages[S.activeTab]
     local newHovered = nil
-    local aeF = S.Cfg.animations and (1 - (0.000001 ^ dt)) or 1
+    local aeF = S.animOn() and (1 - (0.000001 ^ dt)) or 1
     local blockRows = S.Drop.open ~= nil or S.Pick.open ~= nil
-    local secEase = S.Cfg.animations and (1 - (0.0000001 ^ dt)) or 1
+    local secEase = S.animOn() and (1 - (0.0000001 ^ dt)) or 1
     if page then
         for _, sec in ipairs(page.sections) do
             -- animate section collapse (same ease as the sidebar expand, just vertical)
@@ -2032,7 +2182,7 @@ function S.updateControls(dt, mx, my)
                     end
                 end
             end
-            local secHov = S.Cfg.hoverFx and not blockRows and sec.vis and sec.rect and S.inRect(mx, my, sec.rect.x, sec.rect.y, sec.rect.w, sec.rect.h) and mx > (S.Win.x + S.Sb.cur)
+            local secHov = S.hoverOn() and not blockRows and sec.vis and sec.rect and S.inRect(mx, my, sec.rect.x, sec.rect.y, sec.rect.w, sec.rect.h) and mx > (S.Win.x + S.Sb.cur)
             sec.hovT = sec.hovT + ((secHov and 1 or 0) - sec.hovT) * aeF
             sec.panel.Color = S.lerpColor(S.Theme.Panel, S.Theme.PanelHov, sec.hovT)
             local glowA = math.min(1, 0.16 + (0.10 * S.Cfg.cardGlow / 100) + 0.5 * sec.hovT) * S.Cfg.opacity
@@ -2043,7 +2193,7 @@ function S.updateControls(dt, mx, my)
                 if row.vis then
                     local r = row.rect
                     local hov = not blockRows and r and S.inRect(mx, my, r.x, r.y, r.w, r.h) and mx > (S.Win.x + S.Sb.cur)
-                    local hovTarget = (S.Cfg.hoverFx and hov) and 1 or 0
+                    local hovTarget = (S.hoverOn() and hov) and 1 or 0
                     row.hovT = row.hovT + (hovTarget - row.hovT) * aeF
                     if hov and row.tip then newHovered = row end
                     if row.kind == "toggle" then
@@ -2097,7 +2247,7 @@ function S.updateControls(dt, mx, my)
                             local bw = row.bw or 60
                             local bx = row.rect.x + 12 + (i - 1) * (bw + 8)
                             local bHov = not blockRows and S.inRect(mx, my, bx, row.rect.y + 4, bw, row.h - 8)
-                            row.hovTs[i] = row.hovTs[i] + (((S.Cfg.hoverFx and bHov) and 1 or 0) - row.hovTs[i]) * aeF
+                            row.hovTs[i] = row.hovTs[i] + (((S.hoverOn() and bHov) and 1 or 0) - row.hovTs[i]) * aeF
                             row.boxes[i].Color = S.lerpColor(S.Theme.Control, S.lerpColor(S.Theme.Control, S.Theme.White, 0.12), row.hovTs[i])
                             row.olines[i].Color = S.lerpColor(S.Theme.Track, S.Theme.C1, row.hovTs[i])
                             row.lbls[i].Color = S.lerpColor(S.Theme.Text, S.Theme.White, row.hovTs[i])
@@ -2130,7 +2280,7 @@ function S.updateControls(dt, mx, my)
         local g = S.Drop.geom
         for i = 1, g.visN do
             local hov = S.inRect(mx, my, g.bx + 4, g.oy + (i - 1) * 24, g.bw - 8, 22)
-            S.Drop.hovT[i] = S.Drop.hovT[i] + (((S.Cfg.hoverFx and hov) and 1 or 0) - S.Drop.hovT[i]) * aeF
+            S.Drop.hovT[i] = S.Drop.hovT[i] + (((S.hoverOn() and hov) and 1 or 0) - S.Drop.hovT[i]) * aeF
             S.Drop.rows[i].bg.Transparency = 0.85 * S.Drop.hovT[i] * S.Cfg.opacity
             S.Drop.rows[i].txt.Color = S.lerpColor(S.Theme.Text, S.Theme.White, S.Drop.hovT[i])
         end
@@ -2141,7 +2291,7 @@ function S.updateControls(dt, mx, my)
         for i = 1, g.n do
             local r = S.Search.rows[i]
             local hov = S.inRect(mx, my, g.px + 4, g.py + 4 + (i - 1) * g.rowH, g.pw - 8, g.rowH - 2)
-            S.Search.hovT[i] = S.Search.hovT[i] + (((S.Cfg.hoverFx and hov) and 1 or 0) - S.Search.hovT[i]) * aeF
+            S.Search.hovT[i] = S.Search.hovT[i] + (((S.hoverOn() and hov) and 1 or 0) - S.Search.hovT[i]) * aeF
             r.bg.Transparency = 0.85 * S.Search.hovT[i] * S.Cfg.opacity
             r.txt.Color = S.lerpColor(S.Theme.Text, S.Theme.White, S.Search.hovT[i])
         end
@@ -2157,7 +2307,7 @@ function S.updateControls(dt, mx, my)
             end
         end
         if hitIdx ~= 0 and hitIdx ~= S.activeTab then S.navHovIdx = hitIdx end
-        local want = (hitIdx ~= 0 and hitIdx ~= S.activeTab and S.Cfg.hoverFx) and 1 or 0
+        local want = (hitIdx ~= 0 and hitIdx ~= S.activeTab and S.hoverOn()) and 1 or 0
         S.navHovT = S.navHovT + (want - S.navHovT) * aeF
         if S.navHovIdx ~= 0 and S.navHovT > 0.02 and S.Win.visible then
             S.D.navHover.Visible = true
@@ -2512,7 +2662,7 @@ function S.frame()
     local x, y, w, h = S.Win.x, S.Win.y, S.Win.w, S.Win.h
     S.Sb.max = math.max(140, math.min(380, math.floor(w * 0.29)))
 
-    if S.Cfg.preset == "Rainbow" then
+    if S.Cfg.preset == "Rainbow" and not S.Cfg.perfMode then
         S.hue = (S.hue + dt * (S.Cfg.rainbowSpeed / 100) * 0.15) % 1
         S.Theme.C1 = S.hsv2rgb(S.hue, 0.5, 0.85)
         S.Theme.C2 = S.hsv2rgb((S.hue + 0.08) % 1, 0.55, 0.9)
@@ -2521,7 +2671,7 @@ function S.frame()
     end
 
     -- nyan background frame animation (swaps Data + touches Position so Matcha re-decodes)
-    if S.Cfg.preset == "Rainbow" and #S.Const.NYAN_FRAMES > 1 and UI.nyanData and UI.nyanRect then
+    if S.Cfg.preset == "Rainbow" and not S.Cfg.perfMode and #S.Const.NYAN_FRAMES > 1 and UI.nyanData and UI.nyanRect then
         S.nyanClock = S.nyanClock + dt
         local n = #S.Const.NYAN_FRAMES
         local idx = (math.floor(S.nyanClock * S.Const.NYAN_FPS) % n) + 1
@@ -2537,7 +2687,7 @@ function S.frame()
     -- dropdown open/close animation (slide + fade); teardown happens when the close anim finishes
     if S.Drop.open then
         local target = S.Drop.closing and 0 or 1
-        local dE = S.Cfg.animations and (1 - (0.00003 ^ dt)) or 1
+        local dE = S.animOn() and (1 - (0.00003 ^ dt)) or 1
         S.Drop.animT = S.Drop.animT + (target - S.Drop.animT) * dE
         if S.Drop.closing and S.Drop.animT < 0.03 then
             S.hardCloseDropdown()
@@ -2657,9 +2807,9 @@ function S.frame()
 
     local overSidebar = S.inRect(S.In.x, S.In.y, x, y, math.max(S.Sb.cur, S.Const.SB_MIN), h) and S.Drag.mode == nil and not S.Drop.open and not S.Pick.open
     S.Sb.target = (overSidebar and not S.Cfg.collapseSidebar) and S.Sb.max or S.Const.SB_MIN
-    local ease = S.Cfg.animations and (1 - (0.0000001 ^ dt)) or 1
+    local ease = S.animOn() and (1 - (0.0000001 ^ dt)) or 1
     -- gentler ease for the sidebar so it glides open/closed instead of snapping
-    local sbEase = S.Cfg.animations and (1 - (0.0006 ^ dt)) or 1
+    local sbEase = S.animOn() and (1 - (0.0006 ^ dt)) or 1
     local newCur = S.Sb.cur + (S.Sb.target - S.Sb.cur) * sbEase
     if math.abs(newCur - S.Sb.cur) > 0.1 then
         S.Sb.cur = newCur
@@ -2956,7 +3106,7 @@ function S.frame()
     do
         local page = S.curPage()
         if page then
-            local sEase = S.Cfg.animations and (1 - (0.000001 ^ dt)) or 1
+            local sEase = S.animOn() and (1 - (0.000001 ^ dt)) or 1
             local nc = page.scrollCur + (page.scrollY - page.scrollCur) * sEase
             if math.abs(nc - page.scrollCur) > 0.4 then
                 page.scrollCur = nc
@@ -2970,8 +3120,8 @@ function S.frame()
 
     -- scrollbar glow while scrolling by any means
     S.wheelPulse = math.max(0, S.wheelPulse - dt)
-    local scrolling = S.Drag.mode == "scroll" or S.Drag.mode == "sbar" or S.wheelPulse > 0
-    local gEase = S.Cfg.animations and (1 - (0.00001 ^ dt)) or 1
+    local scrolling = not S.Cfg.perfMode and (S.Drag.mode == "scroll" or S.Drag.mode == "sbar" or S.wheelPulse > 0)
+    local gEase = S.animOn() and (1 - (0.00001 ^ dt)) or 1
     S.scrollGlowT = S.scrollGlowT + ((scrolling and 1 or 0) - S.scrollGlowT) * gEase
     if S.D.sbThumb.Visible then
         S.D.sbThumb.Color = S.lerpColor(S.Theme.Track, S.lerpColor(S.Theme.Track, S.Theme.C1, 0.5), S.scrollGlowT)
@@ -3123,7 +3273,31 @@ S.Element = {}
 S.Element.__index = S.Element
 function S.Element.new(row) return setmetatable({ row = row }, S.Element) end
 function S.Element:SetTip(tip) self.row.tip = tip return self end
-function S.Element:Set(v) S.applyRow(self.row, v) S.Win.dirty = true return self end
+S.TEXT_ROWS = { note = true, divider = true, button = true }
+function S.Element:Set(v)
+    if S.TEXT_ROWS[self.row.kind] then return self:SetText(v) end
+    S.applyRow(self.row, v) S.Win.dirty = true return self
+end
+-- change the visible text of a note / divider / button (or any row's label)
+function S.Element:SetText(text)
+    self.row.label = tostring(text)
+    S.Win.dirty = true
+    return self
+end
+-- replace a dropdown's options; keeps the current value if it is still in the list, else picks the first
+function S.Element:SetOptions(list)
+    local r = self.row
+    if r.kind ~= "dropdown" then return self end
+    r.options = list or {}
+    local keep = false
+    for _, o in ipairs(r.options) do
+        if tostring(o) == tostring(r.value) then keep = true break end
+    end
+    if not keep then S.applyRow(r, tostring(r.options[1] or "")) end
+    if S.Drop.open == r then S.Drop.options = r.options end
+    S.Win.dirty = true
+    return self
+end
 function S.Element:Get()
     local r = self.row
     if r.color ~= nil then return r.color elseif r.vk ~= nil then return r.vk else return r.value end
@@ -3229,6 +3403,17 @@ function S.Library:SetFlag(flag, v)
     if r then S.applyRow(r, v) S.Win.dirty = true return true end
     return false
 end
+-- Matcha: notify(message, title, duration). Elsewhere: the standard Roblox notification.
+function S.Library:Notify(title, message, duration)
+    duration = duration or S.Cfg.notifyTime or 5
+    if S.Env.matcha then
+        pcall(notify, tostring(message), tostring(title), duration)
+    else
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", { Title = tostring(title), Text = tostring(message), Duration = duration })
+        end)
+    end
+end
 function S.Library:Show() S.setVisible(true) end
 function S.Library:Hide() S.setVisible(false) end
 function S.Library:Toggle() S.setVisible(not S.Win.visible) end
@@ -3307,5 +3492,6 @@ end
 S.setVisible(false)   -- stay hidden and untouched until CreateWindow is called
 S.relayout()
 
--- the chunk returns the library directly, so: local Lib = loadstring(...)()  then  Lib:CreateWindow{...}
+-- regular executors: local Lib = loadstring(src)()
+-- Matcha drops chunk return values, so there: loadstring(src)() then local Lib = _G.FALUI.Library
 return S.Library

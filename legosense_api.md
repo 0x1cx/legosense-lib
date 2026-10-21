@@ -4,14 +4,25 @@ A Drawing-based UI library for Matcha (external Roblox LuaVM). Load it, call `Cr
 
 ## Loading
 
-The chunk **returns the library** and also exposes it at `_G.FALUI.Library`.
+The chunk returns the library and also exposes it at `_G.FALUI.Library`.
 
 ```lua
-local Library = loadstring(game:HttpGet("Legosense/ui.lua"))()
--- or: local Library = _G.FALUI.Library
+-- regular executors
+local Library = loadstring(game:HttpGet(URL))()
+
+-- Matcha: loadstring drops a chunk's return values, so read the global instead
+loadstring(game:HttpGet(URL))()
+local Library = _G.FALUI.Library
 ```
 
 Nothing is shown and no files are touched until you call `CreateWindow`.
+
+## Environments
+
+- **Matcha** (`identifyexecutor() == "Matcha"`) is the only non-standard runtime; its quirks are handled internally.
+- **Anything else** is treated as regular Roblox Luau. Missing executor globals are filled in: `isfile`/`readfile`/etc. become no-ops, `iskeypressed`/`ismouse1pressed`/`ismouse2pressed` fall back to `UserInputService`, HTTP falls back to `httpget`/`request`/`HttpService`.
+- **Rendering depends only on `Drawing`.** With a Drawing library the UI renders (Matcha or any executor that has one). Drawing props that only Matcha supports (`Corner`, `Rounding`) are dropped silently on other executors. Without Drawing the library runs **headless**: flags, configs and callbacks work, nothing is drawn.
+- Detection results: `_G.FALUI_ENV` → `{ matcha, executor, version, drawing, filesystem, input }`.
 
 ## CreateWindow
 
@@ -69,11 +80,15 @@ local row = sec:CreateToggle{ Text="X", Flag="x" }
 row:Set(true)      -- set value (applies + fires Callback)
 row:Get()          -- current value (bool / number / string / Color3 / vk)
 row:SetTip("...")  -- set/replace tooltip
+row:SetText("...") -- change the text of a note / divider / button (Set on those rows does the same)
+row:SetOptions({ "A", "B" }) -- dropdowns: replace the options; keeps the value if still listed, else picks the first
 ```
 
 ## Flags & config
 
 - Any control with a `Flag` is saved/restored by the config system and by autosave.
+- Saved values apply when a flag is created, so the normal order (`CreateWindow`, then tabs/controls) restores everything; the control's `Callback` fires with the saved value.
+- Autosave keeps saved values for flags the current script didn't create.
 - Read/write by flag from anywhere:
 
 ```lua
@@ -97,6 +112,8 @@ Library:SetPreset("Ember")
 
 Fine-grained theme controls (Color 1/2, Background, Text color, Card glow, Corner radius, FX, fonts, etc.) live in the Settings tab.
 
+**Performance mode** (Settings) turns off everything with a per-frame cost: easing animations, hover fades, snow, the Rainbow theme's colour cycling and nyan animation, and the scroll glow.
+
 ## Library methods
 
 ```lua
@@ -105,6 +122,7 @@ Library:CreateTab(name,icon) -- also on the Window handle
 Library:Tab(ref)             -- existing tab by name or index
 Library:SetPreset(name)
 Library:GetFlag(flag) / :SetFlag(flag, v)
+Library:Notify(title, message, duration) -- Matcha notify on Matcha, Roblox SendNotification elsewhere; duration defaults to the "Notify time" setting
 Library:Show() / :Hide() / :Toggle()
 Library:Unload()             -- disconnect, autosave, remove all Drawing objects
 Library.Flags                -- flag -> row table
