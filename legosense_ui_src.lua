@@ -902,7 +902,28 @@ function S.addSection(tabIdx, title, side)
         glow = S.New("Square", { Filled = false, Color = S.Theme.C1, Transparency = 0, ZIndex = 32, Corner = 6, Visible = false }),
     }
     table.insert(S.Pages[tabIdx].sections, sec)
+    if S.savedCollapsed(tabIdx, title) then sec.collapsed = true sec.colT = 0 end
     return sec
+end
+
+-- UI state (collapsed cards, open tab) is saved with the settings as "_collapsed" = { "Tab/Card", ... } and "_tab"
+function S.savedCollapsed(tabIdx, title)
+    local list = S.Persisted and S.Persisted._collapsed
+    if type(list) ~= "table" then return false end
+    local key = S.tabNameOf(tabIdx) .. "/" .. tostring(title)
+    for _, k in ipairs(list) do if k == key then return true end end
+    return false
+end
+function S.uiStateSnapshot(t)
+    local list = {}
+    for idx, page in pairs(S.Pages) do
+        for _, sec in ipairs(page.sections) do
+            if sec.collapsed then list[#list + 1] = S.tabNameOf(idx) .. "/" .. tostring(sec.title) end
+        end
+    end
+    table.sort(list)
+    t._collapsed = list
+    t._tab = S.tabNameOf(S.activeTab)
 end
 
 -- every value loaded from settings/config, kept so flags created AFTER CreateWindow (the normal
@@ -1199,6 +1220,7 @@ function S.snapshot()
         local v = S.flagValue(row)
         if v ~= nil then t[flag] = v end
     end
+    S.uiStateSnapshot(t)
     local th = {}
     for _, k in ipairs(S.THEME_KEYS) do local c = S.Theme[k] th[k] = { c.R, c.G, c.B } end
     t.theme = th
@@ -2438,6 +2460,7 @@ function S.switchTab(i)
     S.activeTab = i
     S.setPageVisible(S.activeTab, true)
     S.hideTip()
+    S.markChanged()
     S.Win.dirty = true
 end
 
@@ -2964,6 +2987,7 @@ function S.frame()
                         local hr = sec.headRect
                         if hr and S.In.y > y + S.TB and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h) then
                             sec.collapsed = not sec.collapsed
+                            S.markChanged()
                             handled = true
                             break
                         end
@@ -3413,7 +3437,9 @@ UI.Library = S.Library
 S.Library.Flags = S.FlagRows
 
 function S.Library:CreateTab(name, icon)
-    return S.wrapTab(S.newTabIndex(name or "Tab", icon))
+    local idx = S.newTabIndex(name or "Tab", icon)
+    if S.Persisted._tab == (name or "Tab") then S.switchTab(idx) end -- reopen the tab that was open last time
+    return S.wrapTab(idx)
 end
 
 -- grab a built-in tab (Home/Visuals/Aim/Modifiers/Farm) or Settings, by name or index
@@ -3475,6 +3501,12 @@ function S.loadPersisted()
             if ok and txt then S.loadSnapshot(txt) end
         end
         if S.rAutoLoad then S.rAutoLoad.value = S.Cfg.autoLoad end
+    end
+    -- built-in (Settings) cards already exist by now; cards made later are restored in addSection
+    for idx, page in pairs(S.Pages) do
+        for _, sec in ipairs(page.sections) do
+            if S.savedCollapsed(idx, sec.title) then sec.collapsed = true sec.colT = 0 end
+        end
     end
 end
 
