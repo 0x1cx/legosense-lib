@@ -19,13 +19,13 @@ do
 
     -- filesystem: no-ops when missing (every library call site is pcall'd)
     if not env.filesystem then
-        isfile     = isfile     or function() return false end
-        isfolder   = isfolder   or function() return false end
-        readfile   = readfile   or function(p) error("[legosense] no filesystem: cannot read " .. tostring(p)) end
-        writefile  = writefile  or function() end
+        isfile = isfile or function() return false end
+        isfolder = isfolder or function() return false end
+        readfile = readfile or function(p) error("[legosense] no filesystem: cannot read " .. tostring(p)) end
+        writefile = writefile or function() end
         appendfile = appendfile or function() end
         makefolder = makefolder or function() end
-        delfile    = delfile    or function() end
+        delfile = delfile or function() end
     end
 
     -- input: Windows VK codes -> UserInputService, only for globals the executor doesn't provide
@@ -41,13 +41,13 @@ do
         if type(iskeypressed) ~= "function" then
             local KC = Enum.KeyCode
             local VK = {
-                [0x08] = KC.Backspace, [0x09] = KC.Tab,         [0x0D] = KC.Return,
+                [0x08] = KC.Backspace, [0x09] = KC.Tab, [0x0D] = KC.Return,
                 [0x10] = KC.LeftShift, [0x11] = KC.LeftControl, [0x12] = KC.LeftAlt,
-                [0x1B] = KC.Escape,    [0x20] = KC.Space,
-                [0x21] = KC.PageUp,    [0x22] = KC.PageDown,    [0x23] = KC.End,   [0x24] = KC.Home,
-                [0x25] = KC.Left,      [0x26] = KC.Up,          [0x27] = KC.Right, [0x28] = KC.Down,
-                [0x2D] = KC.Insert,    [0x2E] = KC.Delete,
-                [0xBD] = KC.Minus,     [0xBE] = KC.Period,      [0xBF] = KC.Slash, [0xDE] = KC.Quote,
+                [0x1B] = KC.Escape, [0x20] = KC.Space,
+                [0x21] = KC.PageUp, [0x22] = KC.PageDown, [0x23] = KC.End, [0x24] = KC.Home,
+                [0x25] = KC.Left, [0x26] = KC.Up, [0x27] = KC.Right, [0x28] = KC.Down,
+                [0x2D] = KC.Insert, [0x2E] = KC.Delete,
+                [0xBD] = KC.Minus, [0xBE] = KC.Period, [0xBF] = KC.Slash, [0xDE] = KC.Quote,
             }
             local digits = { "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine" }
             for i = 0, 9 do VK[0x30 + i] = KC[digits[i + 1]] end
