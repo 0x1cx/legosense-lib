@@ -62,6 +62,7 @@ All take an options table and return a **row handle** (see below). `Text`/`Name`
 sec:CreateToggle{  Text="Enabled", Default=false, Flag="aim_on", Callback=function(v) end }
 sec:CreateSlider{  Text="FOV", Min=10, Max=400, Default=120, Suffix=" px", Flag="aim_fov", Callback=function(v) end }
 sec:CreateDropdown{ Text="Mode", Options={"Head","Torso"}, Default="Head", Flag="aim_mode", Callback=function(v) end }
+sec:CreateDropdown{ Text="Show", Options={"A","B","C"}, Multi=true, Default={"A"}, Flag="show", Callback=function(picked) end } -- multi-select: value is an array of picked options; the popout stays open while picking
 sec:CreateButton{  Text="Panic", Callback=function() end }
 sec:CreateButtonRow{ { label="Save", cb=function() end }, { label="Load", cb=function() end } }
 sec:CreateColor{   Text="ESP color", Default=Color3.fromRGB(255,0,0), Flag="esp_col", Callback=function(c) end } -- alias: CreateColorpicker

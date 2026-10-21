@@ -756,6 +756,36 @@ function S.openDropdown(row)
     S.Drop.animT = 0            -- grows to 1 -> slides down + fades in
 end
 
+-- multi dropdowns hold an array of picked options; single ones a string
+function S.dropHas(row, o)
+    if not row.multi then return o == tostring(row.value) end
+    for _, v in ipairs(row.value) do if v == o then return true end end
+    return false
+end
+function S.dropText(row)
+    if not row.multi then return tostring(row.value) end
+    local n = #row.value
+    if n == 0 then return "None" end
+    if n == #row.options and n > 1 then return "All" end
+    return table.concat(row.value, ", ")
+end
+-- returns true when the popout should stay open (multi keeps it open so several can be picked)
+function S.dropPick(row, pick)
+    if row.multi then
+        local v, found = {}, false
+        for _, x in ipairs(row.value) do
+            if x == pick then found = true else v[#v + 1] = x end
+        end
+        if not found then v[#v + 1] = pick end
+        row.value = v
+    else
+        row.value = pick
+    end
+    if row.onChange then pcall(row.onChange, row.value) end
+    if row.flag then S.markChanged() end
+    return row.multi
+end
+
 function S.dropFiltered()
     local out = {}
     local q = S.Drop.searchBuf:lower()
@@ -943,14 +973,15 @@ function S.addButtonRow(sec, defs)
     return row
 end
 
-function S.addDropdown(sec, label, options, default, flag, onChange)
+function S.addDropdown(sec, label, options, default, flag, onChange, multi)
+    if multi then default = table.clone(type(default) == "table" and default or {}) end
     local row = {
-        kind = "dropdown", label = label, options = options, value = default, onChange = onChange,
+        kind = "dropdown", label = label, options = options, value = default, onChange = onChange, multi = multi,
         hovT = 0, vis = true, h = 34,
         lbl = S.New("Text", { Text = label, Color = S.Theme.Text, Transparency = 1, ZIndex = 33, Font = 0, Size = S.FS, Visible = false }),
         box = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = S.Const.ALPHA_CTRL, ZIndex = 33, Corner = 4, Visible = false }),
         oline = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 34, Corner = 4, Visible = false }),
-        val = S.New("Text", { Text = default, Color = S.Theme.Text, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS, Visible = false }),
+        val = S.New("Text", { Text = "", Color = S.Theme.Text, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS, Visible = false }),
         arr = S.New("Text", { Text = "v", Color = S.Theme.Dim, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS - 1, Visible = false }),
     }
     table.insert(sec.rows, row)
@@ -1181,9 +1212,9 @@ function S.applyRow(row, v)
     elseif row.kind == "slider" and type(v) == "number" then
         row.value = math.max(row.min, math.min(row.max, v))
         if row.onChange then pcall(row.onChange, row.value) end
-    elseif row.kind == "dropdown" and type(v) == "string" then
-        row.value = v
-        if row.onChange then pcall(row.onChange, v) end
+    elseif row.kind == "dropdown" and (type(v) == "table") == (row.multi == true) then
+        row.value = row.multi and table.clone(v) or v
+        if row.onChange then pcall(row.onChange, row.value) end
     elseif row.kind == "color" and type(v) == "table" and v[1] then
         -- accept 0-1 floats (current) or legacy 0-255 ints
         local r, g, b = v[1], v[2] or 0, v[3] or 0
@@ -1848,7 +1879,7 @@ function S.relayoutRaw()
                         row.oline.Size = Vector2.new(boxW, 22)
                         row.oline.Corner = S.CR(4)
                         row.val.Position = Vector2.new(sx + swid - 12 - boxW + 8, ry + 10)
-                        row.val.Text = S.truncate(tostring(row.value), boxW - 28)
+                        row.val.Text = S.truncate(S.dropText(row), boxW - 28)
                         row.arr.Position = Vector2.new(sx + swid - 12 - 14, ry + 10)
                     elseif row.kind == "color" then
                         row.lbl.Position = Vector2.new(innerX, ry + 10)
@@ -1971,7 +2002,7 @@ function S.relayoutRaw()
                 r.txt.Text = S.truncate(filtered[idx], bw - 44)
                 r.txt.Visible = true
                 r.chk.Position = Vector2.new(bx + bw - 18 - (total > S.Const.MAXOPT and 6 or 0), oy + 4 + (i - 1) * 24)
-                r.chk.Visible = filtered[idx] == tostring(row.value)
+                r.chk.Visible = S.dropHas(row, filtered[idx])
                 r.chk.Color = S.Theme.C1
             else
                 r.bg.Visible = false
@@ -2716,12 +2747,9 @@ function S.frame()
             function() S.Drop.searchBuf = S.Drop.searchBuf:sub(1, -2) S.Drop.scroll = 0 S.Win.dirty = true end,
             function()
                 local f = S.dropFiltered()
-                if #S.Drop.searchBuf > 0 and f[1] then
-                    S.Drop.open.value = f[1]
-                    if S.Drop.open.onChange then pcall(S.Drop.open.onChange, S.Drop.open.value) end
-                    if S.Drop.open.flag then S.markChanged() end
-                end
-                S.closeDropdown()
+                local keep = false
+                if #S.Drop.searchBuf > 0 and f[1] then keep = S.dropPick(S.Drop.open, f[1]) end
+                if keep then S.Drop.searchBuf = "" else S.closeDropdown() end
                 S.Win.dirty = true
             end
         )
@@ -3016,12 +3044,8 @@ function S.frame()
         if S.Drag.mode == "droppend" and S.Drop.open then
             local f = S.dropFiltered()
             local pick = f[S.Drag.pendIdx]
-            if pick then
-                S.Drop.open.value = pick
-                if S.Drop.open.onChange then pcall(S.Drop.open.onChange, pick) end
-                if S.Drop.open.flag then S.markChanged() end
-            end
-            S.closeDropdown()
+            local keep = pick and S.dropPick(S.Drop.open, pick)
+            if not keep then S.closeDropdown() end
             S.Win.dirty = true
         elseif S.Drag.mode == "scroll" then
             -- release a flick: hand the tracked velocity to the momentum integrator
@@ -3296,6 +3320,11 @@ function S.Element:SetOptions(list)
     local r = self.row
     if r.kind ~= "dropdown" then return self end
     r.options = list or {}
+    if r.multi then
+        if S.Drop.open == r then S.Drop.options = r.options end
+        S.Win.dirty = true
+        return self
+    end
     local keep = false
     for _, o in ipairs(r.options) do
         if tostring(o) == tostring(r.value) then keep = true break end
@@ -3330,7 +3359,9 @@ function S.Section:CreateSlider(o)
 end
 function S.Section:CreateDropdown(o)
     o = o or {}
-    local r = S.addDropdown(self.section, o.Text or o.Name or "Dropdown", o.Options or {}, o.Default or (o.Options and o.Options[1]) or "", o.Flag, o.Callback)
+    local def = o.Default
+    if def == nil and not o.Multi then def = (o.Options and o.Options[1]) or "" end
+    local r = S.addDropdown(self.section, o.Text or o.Name or "Dropdown", o.Options or {}, def, o.Flag, o.Callback, o.Multi)
     r.tip = o.Tip self:_refresh() return S.Element.new(r)
 end
 function S.Section:CreateButton(o)
