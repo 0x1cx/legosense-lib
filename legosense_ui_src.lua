@@ -3232,6 +3232,9 @@ UI.Conn = S.RunService.RenderStepped:Connect(function()
 end)
 
 function UI.Unload()
+    if UI.unloaded then return end -- Unload UI button, X, the script's own unload and a re-load can all fire it
+    UI.unloaded = true
+    if S.onUnload then pcall(S.onUnload) end -- let the consumer script stop its loops/ESP too
     if UI.Conn then pcall(function() UI.Conn:Disconnect() end) end
     for _, c in ipairs(UI.WheelConns) do pcall(function() c:Disconnect() end) end
     if S.Cfg.autoSave then pcall(S.saveSettings) end
@@ -3422,6 +3425,7 @@ function S.Library:Show() S.setVisible(true) end
 function S.Library:Hide() S.setVisible(false) end
 function S.Library:Toggle() S.setVisible(not S.Win.visible) end
 function S.Library:Unload() UI.Unload() end
+function S.Library:OnUnload(fn) S.onUnload = fn end
 
 -- load persisted state from disk (runs once FOLDER/CFGSUB are known, i.e. inside CreateWindow)
 function S.loadPersisted()

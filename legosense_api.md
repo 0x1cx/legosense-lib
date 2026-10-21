@@ -125,6 +125,7 @@ Library:GetFlag(flag) / :SetFlag(flag, v)
 Library:Notify(title, message, duration) -- Matcha notify on Matcha, Roblox SendNotification elsewhere; duration defaults to the "Notify time" setting
 Library:Show() / :Hide() / :Toggle()
 Library:Unload()             -- disconnect, autosave, remove all Drawing objects
+Library:OnUnload(fn) -- fn runs once when the UI unloads by any route (Unload UI button, X, Library:Unload, a re-load); stop your loops/ESP here
 Library.Flags                -- flag -> row table
 ```
 
