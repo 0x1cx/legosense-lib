@@ -1869,7 +1869,7 @@ function S.relayoutRaw()
                         end
                     elseif row.kind == "dropdown" then
                         row.lbl.Position = Vector2.new(innerX, ry + 10)
-                        local boxW = math.max(90, math.floor(innerW * 0.45))
+                        local boxW = math.max(135, math.floor(innerW * 0.675))
                         row.boxW = boxW
                         row.lbl.Text = S.truncate(row.label, innerW - boxW - 10)
                         row.box.Position = Vector2.new(sx + swid - 12 - boxW, ry + 6)
