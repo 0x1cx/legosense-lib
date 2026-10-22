@@ -3593,6 +3593,7 @@ function S.wrapTab(tabIdx) return S.Tab.new(tabIdx) end
 S.Library = {}
 UI.Library = S.Library
 S.Library.Flags = S.FlagRows
+S.Library.Theme = S.Theme -- live: presets edit this table in place, so scripts can match the UI colours
 
 function S.Library:CreateTab(name, icon)
     local idx = S.newTabIndex(name or "Tab", icon)
