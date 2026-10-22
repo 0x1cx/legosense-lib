@@ -924,6 +924,9 @@ function S.uiStateSnapshot(t)
     table.sort(list)
     t._collapsed = list
     t._tab = S.tabNameOf(S.activeTab)
+    local ov = {}
+    for _, o in ipairs(S.Overlays) do ov[o.id] = { o.x, o.y } end
+    t._overlays = ov
 end
 
 -- every value loaded from settings/config, kept so flags created AFTER CreateWindow (the normal
@@ -1019,6 +1022,7 @@ function S.addColor(sec, label, default, flag, onChange)
     return S.regFlag(row, flag)
 end
 
+S.KeybindRows = {}
 function S.addKeybind(sec, label, defaultVk, flag, onChange)
     local row = {
         kind = "keybind", label = label, vk = defaultVk, onChange = onChange, hovT = 0, vis = true, h = 34,
@@ -1027,6 +1031,7 @@ function S.addKeybind(sec, label, defaultVk, flag, onChange)
         chipT= S.New("Text", { Text = S.keyName(defaultVk), Color = S.Theme.Dim, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS - 1, Visible = false }),
     }
     table.insert(sec.rows, row)
+    table.insert(S.KeybindRows, row)
     return S.regFlag(row, flag)
 end
 
@@ -1426,7 +1431,7 @@ do
 
     local sIface = S.addSection(S.SETTINGS_TAB, "INTERFACE", "right")
     S.addKeybind(sIface, "Menu key", 0x24, "menuKey", function(vk) S.Cfg.menuKey = vk S.markChanged() end)
-    S.addToggle(sIface, "Keybind overlay", false, "keybindOverlay", function(v) S.Cfg.keybindOverlay = v S.markChanged() end)
+    S.addToggle(sIface, "Keybind overlay", false, "keybindOverlay", function(v) S.Cfg.keybindOverlay = v S.markChanged() end).tip = "Shows every keybind; drag it by its title while the menu is open"
     S.addToggle(sIface, "Block Roblox input", true, "blockInput", function(v)
         S.Cfg.blockInput = v
         pcall(setrobloxinput, not (v and S.Win.visible)) -- apply now if the menu is open
@@ -2581,6 +2586,153 @@ function S.saveSettings()
     pcall(writefile, S.saveTargetPath(), S.snapshot())
 end
 
+-- ========== overlays ==========
+-- small always-on-top panels (keybinds, staff list, ...) that stay up with the menu closed.
+-- a script feeds rows with SetRows; text is only rewritten when it changes (Text writes are slow in Matcha).
+-- drag one by its header while the menu is open; positions are saved with the settings.
+S.Overlays = {}
+S.Const.OV_ROW, S.Const.OV_PAD, S.Const.OV_HEAD = 18, 9, 24
+S.Overlay = {}
+S.Overlay.__index = S.Overlay
+
+function S.newOverlay(opts)
+    opts = opts or {}
+    local n = #S.Overlays
+    local font = S.FontIds[S.Cfg.font] or 0
+    local ov = setmetatable({
+        id = tostring(opts.Id or opts.Title or ("overlay" .. (n + 1))), title = tostring(opts.Title or "Overlay"),
+        x = opts.Position and opts.Position.X or 24, y = opts.Position and opts.Position.Y or (260 + n * 140),
+        minW = opts.MinWidth or 160, empty = opts.EmptyText or "None",
+        rows = {}, visible = opts.Visible ~= false, dirty = true, font = font,
+        L = {}, R = {}, lTxt = {}, rTxt = {}, lCol = {}, rCol = {},
+    }, S.Overlay)
+    ov.bg = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = 0.9, ZIndex = 20, Corner = S.CR(5), Visible = false })
+    ov.edge = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 21, Corner = S.CR(5), Visible = false })
+    ov.accent = S.New("Square", { Filled = true, Color = S.Theme.C1, Transparency = 1, ZIndex = 21, Visible = false })
+    ov.head = S.New("Text", { Text = ov.title, Color = S.Theme.Header, Transparency = 1, ZIndex = 22, Font = font, Size = S.FS, Visible = false })
+    table.insert(S.Overlays, ov)
+    return ov
+end
+
+-- rows: { { "left", "right", leftColor?, rightColor? }, ... } or { { Left = .., Right = .., Color = .., RightColor = .. }, ... }
+function S.Overlay:SetRows(rows)
+    local out = {}
+    for i, r in ipairs(rows or {}) do
+        out[i] = {
+            l = tostring(r.Left or r[1] or ""), r = tostring(r.Right or r[2] or ""),
+            lc = r.Color or r[3], rc = r.RightColor or r[4],
+        }
+    end
+    self.rows = out
+    self.dirty = true
+    return self
+end
+function S.Overlay:SetTitle(t) self.title = tostring(t) self.dirty = true return self end
+function S.Overlay:SetVisible(v) self.visible = v and true or false self.dirty = true return self end
+function S.Overlay:IsVisible() return self.visible end
+
+function S.ovRowObjs(ov, i)
+    if not ov.L[i] then
+        ov.L[i] = S.New("Text", { Text = "", Color = S.Theme.Text, Transparency = 1, ZIndex = 22, Font = ov.font, Size = S.FS, Visible = false })
+        ov.R[i] = S.New("Text", { Text = "", Color = S.Theme.Dim, Transparency = 1, ZIndex = 22, Font = ov.font, Size = S.FS, Visible = false })
+    end
+    return ov.L[i], ov.R[i]
+end
+
+function S.layoutOverlay(ov)
+    ov.dirty = false
+    local show = ov.visible and UI.created
+    local rows = ov.rows
+    local list = (#rows > 0) and rows or { { l = ov.empty, r = "", lc = S.Theme.Dim } }
+    local pad, rowH, headH = S.Const.OV_PAD, S.Const.OV_ROW, S.Const.OV_HEAD
+    local w = math.max(ov.minW, #ov.title * S.CHAR_W + pad * 2)
+    for _, r in ipairs(list) do w = math.max(w, (#r.l + #r.r) * S.CHAR_W + pad * 2 + 22) end
+    local h = headH + #list * rowH + 6
+    ov.w, ov.h = w, h
+    local x, y = math.floor(ov.x), math.floor(ov.y)
+    ov.bg.Visible, ov.edge.Visible, ov.accent.Visible, ov.head.Visible = show, show, show, show
+    if show then
+        ov.bg.Position, ov.bg.Size, ov.bg.Color, ov.bg.Corner = Vector2.new(x, y), Vector2.new(w, h), S.Theme.Dark, S.CR(5)
+        ov.edge.Position, ov.edge.Size, ov.edge.Color, ov.edge.Corner = Vector2.new(x, y), Vector2.new(w, h), S.Theme.Track, S.CR(5)
+        ov.accent.Position, ov.accent.Size, ov.accent.Color = Vector2.new(x + pad, y + headH - 4), Vector2.new(w - pad * 2, 1), S.Theme.C1
+        if ov.head.Text ~= ov.title then ov.head.Text = ov.title end
+        ov.head.Position, ov.head.Color = Vector2.new(x + pad, y + 5), S.Theme.Header
+    end
+    local n = math.max(#list, #ov.L)
+    for i = 1, n do
+        local r = list[i]
+        if r and show then
+            local L, R = S.ovRowObjs(ov, i)
+            if ov.lTxt[i] ~= r.l then ov.lTxt[i] = r.l L.Text = r.l end
+            if ov.rTxt[i] ~= r.r then ov.rTxt[i] = r.r R.Text = r.r end
+            local lc, rc = r.lc or S.Theme.Text, r.rc or S.Theme.Dim
+            if ov.lCol[i] ~= lc then ov.lCol[i] = lc L.Color = lc end
+            if ov.rCol[i] ~= rc then ov.rCol[i] = rc R.Color = rc end
+            local ry = y + headH + (i - 1) * rowH + 1
+            L.Position = Vector2.new(x + pad, ry)
+            R.Position = Vector2.new(x + w - pad - #r.r * S.CHAR_W, ry)
+            L.Visible, R.Visible = true, true
+        elseif ov.L[i] then
+            ov.L[i].Visible, ov.R[i].Visible = false, false
+        end
+    end
+end
+
+-- built-in keybind overlay: every keybind control, its key, highlighted while held
+S.KeybindOverlay = S.newOverlay({ Id = "keybinds", Title = "Keybinds", Visible = false, EmptyText = "No keybinds" })
+S.kbT = 0
+function S.updateKeybindOverlay(dt)
+    local ov = S.KeybindOverlay
+    if ov.visible ~= (S.Cfg.keybindOverlay == true) then ov:SetVisible(S.Cfg.keybindOverlay) end
+    if not ov.visible then return end
+    S.kbT = S.kbT + dt
+    if S.kbT < 0.05 then return end
+    S.kbT = 0
+    local rows, sig = {}, {}
+    for _, r in ipairs(S.KeybindRows) do
+        if r.vk and r.vk ~= 0 then
+            local held = (r.vk == -2) and ismouse2pressed() or (r.vk > 0 and iskeypressed(r.vk))
+            local key = "[" .. S.keyName(r.vk) .. "]"
+            rows[#rows + 1] = { r.label, key, held and S.Theme.C1 or S.Theme.Text, held and S.Theme.C1 or S.Theme.Dim }
+            sig[#sig + 1] = r.label .. key .. (held and "1" or "0")
+        end
+    end
+    local key = table.concat(sig, "|")
+    if key ~= ov.kbSig then ov.kbSig = key ov:SetRows(rows) end
+end
+
+function S.updateOverlays(dt)
+    S.updateKeybindOverlay(dt)
+    local themeKey = S.Theme.Dark
+    for _, ov in ipairs(S.Overlays) do
+        -- saved position, applied once the settings have been loaded
+        if UI.created and not ov.restored then
+            ov.restored = true
+            local saved = type(S.Persisted._overlays) == "table" and S.Persisted._overlays[ov.id]
+            if type(saved) == "table" and type(saved[1]) == "number" then ov.x, ov.y = saved[1], saved[2] end
+            ov.dirty = true
+        end
+        if ov.theme ~= themeKey or ov.themeC1 ~= S.Theme.C1 then ov.theme, ov.themeC1 = themeKey, S.Theme.C1 ov.dirty = true end
+        -- drag by the header, only while the menu is open (mouse input belongs to the game otherwise)
+        if ov.visible and S.Win.visible and ov.w then
+            if S.In.pressed and not S.ovDrag and S.inRect(S.In.x, S.In.y, ov.x, ov.y, ov.w, S.Const.OV_HEAD)
+                and not S.inRect(S.In.x, S.In.y, S.Win.x, S.Win.y, S.Win.w, S.Win.h) then
+                S.ovDrag = { ov = ov, ox = S.In.x - ov.x, oy = S.In.y - ov.y }
+            end
+        end
+        if S.ovDrag and S.ovDrag.ov == ov then
+            if S.In.down then
+                ov.x, ov.y = S.In.x - S.ovDrag.ox, S.In.y - S.ovDrag.oy
+                ov.dirty = true
+            else
+                S.ovDrag = nil
+                S.markChanged()
+            end
+        end
+        if ov.dirty then S.layoutOverlay(ov) end
+    end
+end
+
 -- ========== main loop ==========
 S.RunService = game:GetService("RunService")
 -- Players service AND LocalPlayer can both be nil right at inject; wait (bounded) for both so
@@ -2718,6 +2870,7 @@ function S.frame()
     end
 
     S.updateSnow(dt, S.runT)
+    S.updateOverlays(dt)
 
     if not S.Win.visible then return end
 
@@ -3488,6 +3641,8 @@ function S.Library:Hide() S.setVisible(false) end
 function S.Library:Toggle() S.setVisible(not S.Win.visible) end
 function S.Library:Unload() UI.Unload() end
 function S.Library:OnUnload(fn) S.onUnload = fn end
+-- a draggable always-on-top panel; see "Overlays" in the API doc
+function S.Library:CreateOverlay(opts) return S.newOverlay(opts) end
 
 -- load persisted state from disk (runs once FOLDER/CFGSUB are known, i.e. inside CreateWindow)
 function S.loadPersisted()

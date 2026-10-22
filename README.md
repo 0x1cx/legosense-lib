@@ -127,8 +127,28 @@ Library:Notify(title, message, duration) -- Matcha notify on Matcha, Roblox Send
 Library:Show() / :Hide() / :Toggle()
 Library:Unload()             -- disconnect, autosave, remove all Drawing objects
 Library:OnUnload(fn) -- fn runs once when the UI unloads by any route (Unload UI button, X, Library:Unload, a re-load); stop your loops/ESP here
+Library:CreateOverlay(opts) -- draggable always-on-top panel (see Overlays below)
 Library.Flags                -- flag -> row table
 ```
+
+## Overlays
+
+Small always-on-top panels that stay up with the menu closed (keybinds, staff lists, timers, ...). Drag one by its title while the menu is open; its position is saved with the settings.
+
+```lua
+local ov = Library:CreateOverlay{ Id = "staff", Title = "Staff Online", EmptyText = "No staff detected", Visible = true, MinWidth = 160 }
+ov:SetRows({
+    { "SomeMod", "Game Moderator  42m", Color3.fromRGB(255, 90, 90) }, -- left, right, leftColor?, rightColor?
+    { Left = "Other", Right = "far" }, -- named form works too
+})
+ov:SetTitle("Staff (2)")
+ov:SetVisible(false)
+ov:IsVisible()
+```
+
+Only text that changed is rewritten, so calling `SetRows` every tick is fine. `Id` keys the saved position; give each overlay its own.
+
+The built-in **Keybind overlay** (UI Settings, Interface) lists every keybind control with its key and lights a row up while its key is held.
 
 ## Notes
 
