@@ -186,7 +186,7 @@ S.Const.SNOW_N = 35
 S.Cfg = {
     animations = true, hoverFx = true, opacity = 1.0,
     rainbow = false, rainbowSpeed = 100,
-    checkbox = false, collapseSidebar = false, inlineDropdowns = false,
+    checkbox = false, collapseSidebar = false, inlineDropdowns = false, blockInput = true,
     tabLayout = "Sidebar", search = "Bar", font = "UI",
     notifyTime = 5, menuKey = 0x24, keybindOverlay = false,
     cardGlow = 60, bgFx = "Snow", border = 0, frost = 0, cornerRadius = 100,
@@ -1427,6 +1427,11 @@ do
     local sIface = S.addSection(S.SETTINGS_TAB, "INTERFACE", "right")
     S.addKeybind(sIface, "Menu key", 0x24, "menuKey", function(vk) S.Cfg.menuKey = vk S.markChanged() end)
     S.addToggle(sIface, "Keybind overlay", false, "keybindOverlay", function(v) S.Cfg.keybindOverlay = v S.markChanged() end)
+    S.addToggle(sIface, "Block Roblox input", true, "blockInput", function(v)
+        S.Cfg.blockInput = v
+        pcall(setrobloxinput, not (v and S.Win.visible)) -- apply now if the menu is open
+        S.markChanged()
+    end).tip = "Stop Matcha's input reaching the game while the menu is open"
     S.addToggle(sIface, "Hover effects", true, "hoverFx", function(v) S.Cfg.hoverFx = v S.markChanged() end)
     S.addToggle(sIface, "Checkbox style", false, "checkbox", function(v) S.Cfg.checkbox = v S.Win.dirty = true S.markChanged() end).tip = "Square checkboxes instead of pills"
     S.addToggle(sIface, "Collapse sidebar", false, "collapseSidebar", function(v) S.Cfg.collapseSidebar = v S.markChanged() end).tip = "Pin the sidebar closed (no hover expand)"
@@ -2443,7 +2448,7 @@ function S.setVisible(v)
         S.D.navHover.Visible = false
         S.Win.dirty = true
     end
-    pcall(setrobloxinput, not v)
+    pcall(setrobloxinput, not (v and S.Cfg.blockInput))
 end
 
 for _, sec in ipairs(S.Pages[S.SETTINGS_TAB].sections) do
