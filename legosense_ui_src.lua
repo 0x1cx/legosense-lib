@@ -3594,6 +3594,8 @@ S.Library = {}
 UI.Library = S.Library
 S.Library.Flags = S.FlagRows
 S.Library.Theme = S.Theme -- live: presets edit this table in place, so scripts can match the UI colours
+-- the Drawing font id the UI currently uses (follows the Font setting), so script text can match it
+function S.Library:GetFontId() return S.FontIds[S.Cfg.font] or 0 end
 
 function S.Library:CreateTab(name, icon)
     local idx = S.newTabIndex(name or "Tab", icon)
