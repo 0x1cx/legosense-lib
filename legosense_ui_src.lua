@@ -3642,6 +3642,7 @@ end
 function S.Library:Show() S.setVisible(true) end
 function S.Library:Hide() S.setVisible(false) end
 function S.Library:Toggle() S.setVisible(not S.Win.visible) end
+function S.Library:IsVisible() return S.Win.visible == true end
 function S.Library:Unload() UI.Unload() end
 function S.Library:OnUnload(fn) S.onUnload = fn end
 -- a draggable always-on-top panel; see "Overlays" in the API doc
