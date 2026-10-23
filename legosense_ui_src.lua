@@ -285,6 +285,24 @@ function S.truncate(label, availPx)
     return label:sub(1, maxChars - 2) .. ".."
 end
 
+-- greedy word wrap into lines that fit availPx; a word longer than a line is split
+function S.wrapText(label, availPx)
+    local maxChars = math.max(1, math.floor(availPx / S.CHAR_W))
+    local lines, cur = {}, ""
+    for word in tostring(label):gmatch("%S+") do
+        while #word > maxChars do
+            if cur ~= "" then lines[#lines + 1] = cur cur = "" end
+            lines[#lines + 1] = word:sub(1, maxChars)
+            word = word:sub(maxChars + 1)
+        end
+        if cur == "" then cur = word
+        elseif #cur + 1 + #word <= maxChars then cur = cur .. " " .. word
+        else lines[#lines + 1] = cur cur = word end
+    end
+    if cur ~= "" or #lines == 0 then lines[#lines + 1] = cur end
+    return lines
+end
+
 function S.truncateB(label, availPx)
     local maxChars = math.floor(availPx / S.CHAR_WB)
     if maxChars <= 0 then return "" end
@@ -1795,6 +1813,15 @@ function S.relayoutRaw()
             colTs = colTs * colTs * (3 - 2 * colTs)
             sec.headRect = { x = sx, y = sy - 2, w = swid, h = 18 }
 
+            -- notes word-wrap to the card width; rewrap only when the width or text changes
+            for _, row in ipairs(sec.rows) do
+                if row.kind == "note" and (row.wrapW ~= innerW or row.wrapSrc ~= row.label) then
+                    row.wrapW, row.wrapSrc = innerW, row.label
+                    local lines = S.wrapText(row.label, innerW)
+                    row.wrapText = table.concat(lines, "\n")
+                    row.h = 24 + (#lines - 1) * 13 -- Drawing Text lines are 13px apart
+                end
+            end
             local rowsSum = 0
             for _, row in ipairs(sec.rows) do rowsSum = rowsSum + S.rowEffH(row) end
             local panelH = (rowsSum + 14) * colTs
@@ -1951,7 +1978,7 @@ function S.relayoutRaw()
                         S.layoutFade(row.segsR, mid + tw / 2 + gap, innerX + innerW, ry + 12, "left", 0.5, S.Win.visible and rvis)
                     elseif row.kind == "note" then
                         row.lbl.Position = Vector2.new(innerX, ry + 5)
-                        row.lbl.Text = S.truncate(row.label, innerW)
+                        row.lbl.Text = row.wrapText or S.truncate(row.label, innerW)
                     end
                 end
                 ry = ry + S.rowEffH(row) * colTs
