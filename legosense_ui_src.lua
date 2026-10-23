@@ -286,7 +286,7 @@ function S.truncate(label, availPx)
 end
 
 -- greedy word wrap into lines that fit availPx; a word longer than a line is split
-function S.wrapText(label, availPx)
+function S.wrapPx(label, availPx)
     local maxChars = math.max(1, math.floor(availPx / S.CHAR_W))
     local lines, cur = {}, ""
     for word in tostring(label):gmatch("%S+") do
@@ -1817,7 +1817,7 @@ function S.relayoutRaw()
             for _, row in ipairs(sec.rows) do
                 if row.kind == "note" and (row.wrapW ~= innerW or row.wrapSrc ~= row.label) then
                     row.wrapW, row.wrapSrc = innerW, row.label
-                    local lines = S.wrapText(row.label, innerW)
+                    local lines = S.wrapPx(row.label, innerW)
                     row.wrapText = table.concat(lines, "\n")
                     row.h = 24 + (#lines - 1) * 13 -- Drawing Text lines are 13px apart
                 end
