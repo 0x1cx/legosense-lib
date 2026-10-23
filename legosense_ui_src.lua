@@ -1092,6 +1092,7 @@ function S.rowObjs(row)
     if row.segsL then for _, b in ipairs(row.segsL) do table.insert(t, b) end end
     if row.segsR then for _, b in ipairs(row.segsR) do table.insert(t, b) end end
     if row.lbls then for _, l in ipairs(row.lbls) do table.insert(t, l) end end
+    if row.wlines then for _, l in ipairs(row.wlines) do table.insert(t, l) end end
     return t
 end
 
@@ -1818,7 +1819,12 @@ function S.relayoutRaw()
                 if row.kind == "note" and (row.wrapW ~= innerW or row.wrapSrc ~= row.label) then
                     row.wrapW, row.wrapSrc = innerW, row.label
                     local lines = S.wrapPx(row.label, innerW)
-                    row.wrapText = table.concat(lines, "\n")
+                    -- one Text per line so each line clips at the window edge on its own
+                    row.wrapLines = lines
+                    row.wlines = row.wlines or {}
+                    for k = #row.wlines + 1, #lines - 1 do
+                        row.wlines[k] = S.New("Text", { Text = "", Color = S.Theme.Dim, Transparency = 1, ZIndex = 33, Font = 0, Size = S.FS - 1, Visible = false })
+                    end
                     row.h = 24 + (#lines - 1) * 13 -- Drawing Text lines are 13px apart
                 end
             end
@@ -1978,7 +1984,16 @@ function S.relayoutRaw()
                         S.layoutFade(row.segsR, mid + tw / 2 + gap, innerX + innerW, ry + 12, "left", 0.5, S.Win.visible and rvis)
                     elseif row.kind == "note" then
                         row.lbl.Position = Vector2.new(innerX, ry + 5)
-                        row.lbl.Text = row.wrapText or S.truncate(row.label, innerW)
+                        if row.wrapLines then
+                            row.lbl.Text = row.wrapLines[1] or ""
+                            for k, wl in ipairs(row.wlines) do
+                                wl.Position = Vector2.new(innerX, ry + 5 + 13 * k)
+                                wl.Text = row.wrapLines[k + 1] or ""
+                                wl.Color = S.Theme.Dim
+                            end
+                        else
+                            row.lbl.Text = S.truncate(row.label, innerW)
+                        end
                     end
                 end
                 ry = ry + S.rowEffH(row) * colTs
