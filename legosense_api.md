@@ -54,6 +54,18 @@ local sec = tab:CreateSection("Aimbot", "left")    -- title, side: "left" | "rig
 - `Window:CreateGroupbox` is an alias for `CreateSection`.
 - Grab an existing tab by name/index: `Library:Tab("Settings")` or `Library:Tab(1)`.
 
+### Sub-tabs inside a card
+
+```lua
+local st = sec:CreateSubTabs({ "Aimbot", "Prediction", "FOV" })
+st.Aimbot:CreateToggle{ Text="Enabled", Flag="aim_on" }   -- each handle has every Create* method
+st.FOV:CreateSlider{ Text="Radius", Min=2, Max=300, Flag="aim_fov" }
+```
+
+- Adds a tab strip to the card; only the selected sub-tab's rows show (the card resizes smoothly).
+- Controls made on `sec` itself stay visible on every sub-tab.
+- The selected sub-tab is saved with the UI state; search results switch to the right sub-tab.
+
 ## Controls
 
 All take an options table and return a **row handle** (see below). `Text`/`Name` interchangeable. `Flag` makes the value persist in configs. `Tip` shows a hover tooltip.

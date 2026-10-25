@@ -933,14 +933,16 @@ function S.savedCollapsed(tabIdx, title)
     return false
 end
 function S.uiStateSnapshot(t)
-    local list = {}
+    local list, subs = {}, {}
     for idx, page in pairs(S.Pages) do
         for _, sec in ipairs(page.sections) do
             if sec.collapsed then list[#list + 1] = S.tabNameOf(idx) .. "/" .. tostring(sec.title) end
+            if sec.subKey then subs[sec.subKey] = sec.subSel end
         end
     end
     table.sort(list)
     t._collapsed = list
+    t._subtabs = subs
     t._tab = S.tabNameOf(S.activeTab)
     local ov = {}
     for _, o in ipairs(S.Overlays) do ov[o.id] = { o.x, o.y } end
@@ -1081,9 +1083,27 @@ function S.addNote(sec, label)
     return row
 end
 
+-- sub-tab strip at the top of a card; rows made through a sub-tab handle carry row.sub and
+-- only show while sec.subSel == row.sub (reuses the showT fade/resize of conditional rows)
+function S.addSubTabs(sec, names, tabIdx)
+    local row = { kind = "subtabs", names = names, hovT = 0, vis = true, hovTs = {}, h = 30, lbls = {},
+        bar = S.New("Square", { Filled = true, Color = S.Theme.C1, Transparency = 1, ZIndex = 34, Corner = 1, Visible = false }),
+        base = S.New("Square", { Filled = true, Color = S.Theme.Track, Transparency = 0.6, ZIndex = 33, Visible = false }) }
+    for i, n in ipairs(names) do
+        row.lbls[i] = S.New("Text", { Text = n, Color = S.Theme.Dim, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS, Visible = false })
+        row.hovTs[i] = 0
+    end
+    local saved = S.Persisted and type(S.Persisted._subtabs) == "table" and S.Persisted._subtabs[S.tabNameOf(tabIdx) .. "/" .. tostring(sec.title)]
+    sec.subSel = names[1]
+    for _, n in ipairs(names) do if n == saved then sec.subSel = n end end
+    sec.subKey = S.tabNameOf(tabIdx) .. "/" .. tostring(sec.title)
+    table.insert(sec.rows, row)
+    return row
+end
+
 function S.rowObjs(row)
     local t = {}
-    for _, key in ipairs({"lbl", "track", "knob", "chip", "chipT", "box", "val", "arr", "sw", "txt", "oline"}) do
+    for _, key in ipairs({"lbl", "track", "knob", "chip", "chipT", "box", "val", "arr", "sw", "txt", "oline", "bar", "base"}) do
         if row[key] then table.insert(t, row[key]) end
     end
     if row.segs then for _, s in ipairs(row.segs) do table.insert(t, s) end end
@@ -1105,7 +1125,8 @@ function S.setPageVisible(tabIdx, v)
         sec.panel.Visible = v
         sec.glow.Visible = false
         for _, row in ipairs(sec.rows) do
-            for _, o in ipairs(S.rowObjs(row)) do o.Visible = v end
+            local rv = v and (row.showT == nil or row.showT > 0.02) -- hidden sub-tab / conditional rows stay hidden
+            for _, o in ipairs(S.rowObjs(row)) do o.Visible = rv end
         end
     end
     if not v then S.hardCloseDropdown() S.closePicker() end
@@ -1932,6 +1953,23 @@ function S.relayoutRaw()
                             row.lbls[i].Text = bt
                             row.lbls[i].Position = Vector2.new(bx + math.floor((bw - #bt * S.CHAR_W) / 2), ry + 5 + math.floor((row.h - 8 - S.FS) / 2))
                         end
+                    elseif row.kind == "subtabs" then
+                        local n = #row.names
+                        local cw2 = innerW / n
+                        row.cellW = cw2
+                        for i = 1, n do
+                            local st = S.truncate(row.names[i], math.floor(cw2) - 6)
+                            row.lbls[i].Text = st
+                            row.lbls[i].Position = Vector2.new(innerX + math.floor((i - 1) * cw2 + (cw2 - #st * S.CHAR_W) / 2), ry + 6)
+                        end
+                        row.base.Position = Vector2.new(innerX, ry + row.h - 6)
+                        row.base.Size = Vector2.new(innerW, 1)
+                        local sel = 1
+                        for i, nm in ipairs(row.names) do if nm == sec.subSel then sel = i end end
+                        row.barTo = (sel - 1) * cw2
+                        row.barOff = row.barOff or row.barTo
+                        row.bar.Position = Vector2.new(innerX + math.floor(row.barOff + cw2 * 0.2), ry + row.h - 7)
+                        row.bar.Size = Vector2.new(math.floor(cw2 * 0.6), 2)
                     elseif row.kind == "dropdown" then
                         row.lbl.Position = Vector2.new(innerX, ry + 10)
                         local boxW = math.max(135, math.floor(innerW * 0.675))
@@ -2281,8 +2319,9 @@ function S.updateControls(dt, mx, my)
             end
             -- animate conditional rows (show/hide slider) -> drives fade + smooth card resize
             for _, row in ipairs(sec.rows) do
-                if row.showIf then
-                    local target = (S.Cfg.preset == row.showIf) and 1 or 0
+                if row.showIf or row.sub then
+                    local on = (row.showIf == nil or S.Cfg.preset == row.showIf) and (row.sub == nil or sec.subSel == row.sub)
+                    local target = on and 1 or 0
                     if row.showT ~= target then
                         row.showT = row.showT + (target - row.showT) * aeF
                         if math.abs(row.showT - target) < 0.004 then row.showT = target end
@@ -2359,6 +2398,21 @@ function S.updateControls(dt, mx, my)
                             row.boxes[i].Color = S.lerpColor(S.Theme.Control, S.lerpColor(S.Theme.Control, S.Theme.White, 0.12), row.hovTs[i])
                             row.olines[i].Color = S.lerpColor(S.Theme.Track, S.Theme.C1, row.hovTs[i])
                             row.lbls[i].Color = S.lerpColor(S.Theme.Text, S.Theme.White, row.hovTs[i])
+                        end
+                    elseif row.kind == "subtabs" then
+                        local cw2 = row.cellW or 60
+                        for i, nm in ipairs(row.names) do
+                            local bHov = not blockRows and S.inRect(mx, my, row.rect.x + 12 + (i - 1) * cw2, row.rect.y, cw2, row.h)
+                            row.hovTs[i] = row.hovTs[i] + (((S.hoverOn() and bHov) and 1 or 0) - row.hovTs[i]) * aeF
+                            local base = (nm == sec.subSel) and S.Theme.C1 or S.Theme.Dim
+                            row.lbls[i].Color = S.lerpColor(base, S.Theme.White, row.hovTs[i] * 0.6)
+                        end
+                        row.bar.Color = S.Theme.C1
+                        row.base.Color = S.Theme.Track
+                        if row.barTo and row.barOff ~= row.barTo then
+                            row.barOff = row.barOff + (row.barTo - row.barOff) * aeF
+                            if math.abs(row.barOff - row.barTo) < 0.5 then row.barOff = row.barTo end
+                            S.Win.dirty = true
                         end
                     elseif row.kind == "dropdown" then
                         row.box.Color = S.lerpColor(S.Theme.Control, S.lerpColor(S.Theme.Control, S.Theme.White, 0.12), row.hovT)
@@ -2573,6 +2627,7 @@ end
 function S.gotoResult(res)
     if not res then return end
     S.switchTab(res.tabIdx)
+    if res.row.sub then res.sec.subSel = res.row.sub end
     S.Search.focus = res              -- one-shot: scroll the row into view once it's laid out
     S.closeSearch()
     S.Win.dirty = true
@@ -3241,6 +3296,14 @@ function S.frame()
                                             break
                                         end
                                     end
+                                elseif row.kind == "subtabs" then
+                                    local i = math.floor((S.In.x - r.x - 12) / (row.cellW or 60)) + 1
+                                    local nm = row.names[math.clamp(i, 1, #row.names)]
+                                    if nm ~= sec.subSel then
+                                        sec.subSel = nm
+                                        S.markChanged()
+                                        S.Win.dirty = true
+                                    end
                                 elseif row.kind == "slider" then
                                     local t = (row.value - row.min) / math.max(0.0001, row.max - row.min)
                                     local kx = row.knobX or (row.barX + row.barW * t)
@@ -3598,8 +3661,21 @@ S.Section = {}
 S.Section.__index = S.Section
 function S.Section.new(sec, tabIdx) return setmetatable({ section = sec, tabIdx = tabIdx }, S.Section) end
 function S.Section:_refresh()
+    if self.sub then -- every Create* ends here: tag the row it just added with this sub-tab
+        local r = self.section.rows[#self.section.rows]
+        r.sub = self.sub
+        r.showT = (self.section.subSel == self.sub) and 1 or 0
+    end
     if self.tabIdx == S.activeTab then S.setPageVisible(S.activeTab, true) end
     S.Win.dirty = true
+end
+-- tabs = sec:CreateSubTabs({"Aimbot", "FOV"}); tabs.Aimbot:CreateToggle{...} -> only shown on that sub-tab
+function S.Section:CreateSubTabs(names)
+    S.addSubTabs(self.section, names, self.tabIdx)
+    self:_refresh()
+    local out = {}
+    for _, n in ipairs(names) do out[n] = setmetatable({ section = self.section, tabIdx = self.tabIdx, sub = n }, S.Section) end
+    return out
 end
 function S.Section:CreateToggle(o)
     o = o or {}
