@@ -501,6 +501,8 @@ S.D.searchGlow = S.New("Square", { Filled = false, Color = S.Theme.C1, Transpare
 S.D.search  = S.New("Square", { Filled = true, Color = S.Theme.Panel, Transparency = S.Const.ALPHA_BG, ZIndex = 32, Corner = 8, Visible = true })
 S.D.searchT = S.New("Text",   { Text = "Search", Color = S.Theme.Dim, Transparency = 1, ZIndex = 33, Font = 0, Size = S.FS - 1, Visible = true })
 S.D.searchIco = S.New("Image", { Transparency = 1, ZIndex = 33, Visible = false, Size = Vector2.new(12, 12), Color = S.Theme.Dim })
+S.D.pencil = S.New("Image", { Transparency = 1, ZIndex = 33, Visible = false, Size = Vector2.new(14, 14), Color = S.Theme.Dim })
+S.D.layReset = S.New("Text", { Text = "Reset", Color = S.Theme.Dim, Transparency = 1, ZIndex = 33, Font = 0, Size = S.FS - 1, Visible = false })
 S.D.close   = S.New("Text",   { Text = "x", Color = S.Theme.Dim, Transparency = 1, ZIndex = 33, Font = 0, Size = 15, Visible = true })
 S.D.gripL1  = S.New("Line", { Color = S.Theme.Dim, Transparency = 0.9, ZIndex = 33, Visible = true, Thickness = 1 })
 S.D.gripL2  = S.New("Line", { Color = S.Theme.Dim, Transparency = 0.9, ZIndex = 33, Visible = true, Thickness = 1 })
@@ -571,6 +573,7 @@ function S.startAssets()
     S.assetsStarted = true
     S.loadIcon("settings", function(data) S.D.gear.Data = data end)
     S.loadIcon("search", function(data) S.D.searchIco.Data = data end)
+    S.loadIcon("pencil", function(data) S.D.pencil.Data = data end)
     S.loadAvatar(function(data) S.D.avatar.Data = data end)
 
     task.spawn(function()
@@ -918,6 +921,9 @@ function S.addSection(tabIdx, title, side)
         hsegs= S.NewFadeSegs(33),
         panel= S.New("Square", { Filled = true, Color = S.Theme.Panel, Transparency = S.Const.ALPHA_CARD, ZIndex = 31, Corner = 6, Visible = false }),
         glow = S.New("Square", { Filled = false, Color = S.Theme.C1, Transparency = 0, ZIndex = 32, Corner = 6, Visible = false }),
+        -- layout editor: resize grip (bottom-right), creation order + original side for Reset
+        grip = S.New("Square", { Filled = true, Color = S.Theme.C1, Transparency = 0.9, ZIndex = 36, Corner = 2, Visible = false, Size = Vector2.new(10, 10) }),
+        ci = #S.Pages[tabIdx].sections + 1, side0 = side,
     }
     table.insert(S.Pages[tabIdx].sections, sec)
     if S.savedCollapsed(tabIdx, title) then sec.collapsed = true sec.colT = 0 end
@@ -943,6 +949,19 @@ function S.uiStateSnapshot(t)
     table.sort(list)
     t._collapsed = list
     t._subtabs = subs
+    -- card layout: only tabs the user arranged (or arranged before), so script changes to other tabs still show
+    local lay = {}
+    local old = type(S.Persisted._layout) == "table" and S.Persisted._layout or {}
+    for idx, page in pairs(S.Pages) do
+        local name = S.tabNameOf(idx)
+        if page.edited or old[name] then
+            local l = {}
+            for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.wide == true } end
+            lay[name] = l
+        end
+    end
+    t._layout = lay
+    S.Persisted._layout = lay
     t._tab = S.tabNameOf(S.activeTab)
     local ov = {}
     for _, o in ipairs(S.Overlays) do ov[o.id] = { o.x, o.y } end
@@ -1124,12 +1143,82 @@ function S.setPageVisible(tabIdx, v)
         for _, s in ipairs(sec.hsegs) do s.Visible = false end
         sec.panel.Visible = v
         sec.glow.Visible = false
+        sec.grip.Visible = false
         for _, row in ipairs(sec.rows) do
             local rv = v and (row.showT == nil or row.showT > 0.02) -- hidden sub-tab / conditional rows stay hidden
             for _, o in ipairs(S.rowObjs(row)) do o.Visible = rv end
         end
     end
     if not v then S.hardCloseDropdown() S.closePicker() end
+end
+
+-- ========== card layout editor ==========
+-- S.LayoutEdit (pencil next to the search bar): drag a card to move it, drag its corner grip to resize
+-- (snaps to one column or full width). Saved per tab as "_layout" = { Tab = { {title, side, wide}, ... } }.
+S.LayoutEdit = false
+-- apply the saved layout once the tab's card count changes (cards are added after the settings load)
+function S.applyLayout(tabIdx, page)
+    page.layoutN = #page.sections
+    local saved = type(S.Persisted._layout) == "table" and S.Persisted._layout[S.tabNameOf(tabIdx)]
+    if type(saved) ~= "table" then return end
+    -- shortcut: matched by card title, so two cards with the same title in one tab share a slot; use unique titles
+    local rank = {}
+    for i, e in ipairs(saved) do if type(e) == "table" and e[1] then rank[e[1]] = { i, e[2], e[3] } end end
+    for _, sec in ipairs(page.sections) do
+        local r = rank[tostring(sec.title)]
+        if r then sec.side = (r[2] == "right") and "right" or "left" sec.wide = r[3] == true end
+    end
+    table.sort(page.sections, function(a, b)
+        local ra, rb = rank[tostring(a.title)], rank[tostring(b.title)]
+        if ra and rb and ra[1] ~= rb[1] then return ra[1] < rb[1] end
+        if (ra == nil) ~= (rb == nil) then return ra ~= nil end -- cards the save doesn't know go last
+        return a.ci < b.ci
+    end)
+end
+function S.resetLayout(tabIdx)
+    local page = S.Pages[tabIdx]
+    if not page then return end
+    for _, sec in ipairs(page.sections) do sec.side, sec.wide = sec.side0, false end
+    table.sort(page.sections, function(a, b) return a.ci < b.ci end)
+    page.edited = false
+    if type(S.Persisted._layout) == "table" then S.Persisted._layout[S.tabNameOf(tabIdx)] = nil end
+    S.markChanged()
+    S.Win.dirty = true
+end
+-- while dragging a card: column from the mouse x, slot = before the first card in that column whose top is below the mouse
+function S.dragCard(page, sec)
+    local g = page.geo
+    if not g then return end
+    local side = sec.side
+    if not sec.wide then side = (S.In.x < g.cx + g.cw / 2) and "left" or "right" end
+    local others = {}
+    for _, s in ipairs(page.sections) do if s ~= sec then others[#others + 1] = s end end
+    local top = S.In.y - (S.Drag.cardOy or 0) -- where the dragged card's header would be
+    local at = #others + 1
+    for i, s in ipairs(others) do
+        if (sec.wide or s.wide or s.side == side) and s.headRect and s.headRect.y > top then at = i break end
+    end
+    table.insert(others, at, sec)
+    local changed = side ~= sec.side
+    for i, s in ipairs(others) do if page.sections[i] ~= s then changed = true end end
+    if changed then
+        page.sections = others
+        sec.side = side
+        page.edited = true
+        S.Win.dirty = true
+    end
+end
+function S.resizeCard(page, sec)
+    local g = page.geo
+    if not g then return end
+    local left = sec.wide and g.cx or (g.colX[sec.side] or g.cx)
+    local want = S.In.x - left
+    local wide = math.abs(want - g.cw) < math.abs(want - g.colW)
+    if wide ~= (sec.wide == true) then
+        sec.wide = wide
+        page.edited = true
+        S.Win.dirty = true
+    end
 end
 
 -- ========== config system (clean, sorted JSON) ==========
@@ -1687,7 +1776,16 @@ function S.relayoutRaw()
         S.Search.rect = nil
         if S.Search.active then S.closeSearch() end
     end
-    S.D.title.Text = S.truncateB(titleName, w - sw - 16 - 50 - searchW)
+    -- layout editor: pencil just left of the search bar (or where the bar would end), "Reset" left of it while editing
+    local pX = ((searchW > 40) and (x + w - 36 - searchW) or (x + w - 36)) - 22
+    S.D.pencil.Visible = S.Win.visible
+    S.D.pencil.Position = Vector2.new(pX, y + 11)
+    S.D.pencil.Color = S.LayoutEdit and S.Theme.C1 or S.Theme.Dim
+    S.PencilRect = { x = pX - 4, y = y + 6, w = 22, h = 22 }
+    S.D.layReset.Visible = S.Win.visible and S.LayoutEdit
+    S.D.layReset.Position = Vector2.new(pX - 44, y + 12)
+    S.ResetRect = S.LayoutEdit and { x = pX - 48, y = y + 6, w = 42, h = 22 } or nil
+    S.D.title.Text = S.truncateB(titleName, w - sw - 16 - 50 - searchW - (S.LayoutEdit and 70 or 26))
     S.D.close.Position = Vector2.new(x + w - 20, y + 9)
     do
         local gx, gy = x + w - 6, y + h - 6
@@ -1811,16 +1909,19 @@ function S.relayoutRaw()
         local colW = math.floor((cw - colGap) / 2)
         local colX = { left = cx, right = cx + colW + colGap }
         local colY = { left = startY, right = startY }
+        if page.layoutN ~= #page.sections then S.applyLayout(S.activeTab, page) end
+        page.geo = { cx = cx, cw = cw, colW = colW, colX = colX }
 
         for _, sec in ipairs(page.sections) do
             local sx = colX[sec.side] or cx
             local sy = colY[sec.side] or startY
             local swid = colW
+            if sec.wide then sx, sy, swid = cx, math.max(colY.left, colY.right), cw end
 
             local hdrVis = sy >= visTop - 2 and sy <= visBot - 12
             sec.hdr.Visible = S.Win.visible and hdrVis
             sec.hdr.Position = Vector2.new(sx + 2, sy)
-            sec.hdr.Color = S.Theme.Header
+            sec.hdr.Color = (S.Drag.sec == sec) and S.Theme.C1 or S.Theme.Header
             sec.hdr.Text = S.truncate(sec.title, swid - 4)
             local hlx = sx + 2 + #sec.hdr.Text * S.CHAR_W + 6
             S.layoutFade(sec.hsegs, math.min(hlx, sx + swid), sx + swid, sy + 7, "left", 0.55, S.Win.visible and hdrVis)
@@ -1867,6 +1968,12 @@ function S.relayoutRaw()
                 sec.glow.Corner = S.CR(6)
             end
             sec.rect = { x = sx, y = pTop, w = swid, h = math.max(0, pBot - pTop) }
+            -- resize grip sits on the card's bottom-right corner (only while editing and the corner is on screen)
+            local gy = py + panelH - 12
+            local gripShown = S.LayoutEdit and S.Win.visible and gy >= visTop and gy + 10 <= visBot
+            sec.grip.Visible = gripShown
+            sec.gripRect = gripShown and { x = sx + swid - 16, y = gy - 4, w = 18, h = 18 } or nil
+            if gripShown then sec.grip.Position = Vector2.new(sx + swid - 12, gy) sec.grip.Color = S.Theme.C1 end
 
             local ry = py + 8
             for _, row in ipairs(sec.rows) do
@@ -2036,7 +2143,7 @@ function S.relayoutRaw()
                 end
                 ry = ry + S.rowEffH(row) * colTs
             end
-            colY[sec.side] = ry + 30
+            if sec.wide then colY.left, colY.right = ry + 30, ry + 30 else colY[sec.side] = ry + 30 end
         end
 
         -- scroll bookkeeping
@@ -2332,7 +2439,7 @@ function S.updateControls(dt, mx, my)
             local secHov = S.hoverOn() and not blockRows and sec.vis and sec.rect and S.inRect(mx, my, sec.rect.x, sec.rect.y, sec.rect.w, sec.rect.h) and mx > (S.Win.x + S.Sb.cur)
             sec.hovT = sec.hovT + ((secHov and 1 or 0) - sec.hovT) * aeF
             sec.panel.Color = S.lerpColor(S.Theme.Panel, S.Theme.PanelHov, sec.hovT)
-            local glowA = math.min(1, 0.16 + (0.10 * S.Cfg.cardGlow / 100) + 0.5 * sec.hovT) * S.Cfg.opacity
+            local glowA = math.min(1, 0.16 + (0.10 * S.Cfg.cardGlow / 100) + 0.5 * sec.hovT + (S.LayoutEdit and 0.35 or 0)) * S.Cfg.opacity
             sec.glow.Color = S.Theme.C1
             sec.glow.Transparency = glowA
             sec.glow.Visible = S.Win.visible and sec.vis and glowA > 0.03
@@ -3166,6 +3273,18 @@ function S.frame()
         local consumed = false
         do local p = S.curPage() if p then p.momentum = 0 end end
 
+        -- layout editor toggle / reset
+        if S.PencilRect and S.inRect(S.In.x, S.In.y, S.PencilRect.x, S.PencilRect.y, S.PencilRect.w, S.PencilRect.h) then
+            S.LayoutEdit = not S.LayoutEdit
+            S.closeDropdown() S.closePicker()
+            if not S.LayoutEdit then S.markChanged() end
+            S.Win.dirty = true
+            consumed = true
+        elseif S.ResetRect and S.inRect(S.In.x, S.In.y, S.ResetRect.x, S.ResetRect.y, S.ResetRect.w, S.ResetRect.h) then
+            S.resetLayout(S.activeTab)
+            consumed = true
+        end
+
         -- search field + results popout take clicks first
         if not consumed and S.Search.rect and S.inRect(S.In.x, S.In.y, S.Search.rect.x, S.Search.rect.y, S.Search.rect.w, S.Search.rect.h) then
             S.closeDropdown() S.closePicker()
@@ -3263,11 +3382,26 @@ function S.frame()
             else
                 local handled = false
                 local page = S.Pages[S.activeTab]
-                if page then
+                if page and S.LayoutEdit and S.In.y > y + S.TB then
+                    -- editing: the grip resizes, anywhere else on a card (header or body) moves it; rows don't react
+                    for _, sec in ipairs(page.sections) do
+                        local gr, hr, r = sec.gripRect, sec.headRect, sec.rect
+                        if gr and S.inRect(S.In.x, S.In.y, gr.x, gr.y, gr.w, gr.h) then
+                            S.Drag.mode, S.Drag.sec = "cardsize", sec
+                            handled = true
+                            break
+                        elseif (hr and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h)) or (r and sec.vis and S.inRect(S.In.x, S.In.y, r.x, r.y, r.w, r.h)) then
+                            S.Drag.mode, S.Drag.sec, S.Drag.cardOy = "card", sec, S.In.y - hr.y
+                            handled = true
+                            break
+                        end
+                    end
+                end
+                if page and not handled then
                     -- click a section header -> collapse/expand that card
                     for _, sec in ipairs(page.sections) do
                         local hr = sec.headRect
-                        if hr and S.In.y > y + S.TB and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h) then
+                        if not S.LayoutEdit and hr and S.In.y > y + S.TB and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h) then
                             sec.collapsed = not sec.collapsed
                             S.markChanged()
                             handled = true
@@ -3366,12 +3500,20 @@ function S.frame()
             local page = S.curPage()
             if page then page.momentum = S.Drag.vel or 0 end
         end
+        if S.Drag.sec then S.markChanged() S.Win.dirty = true end
         S.Drag.mode = nil
         S.Drag.row = nil
+        S.Drag.sec = nil
         S.Drag.vel = 0
     end
 
-    if S.Drag.mode == "move" then
+    if S.Drag.mode == "card" and S.Drag.sec then
+        local page = S.curPage()
+        if page then S.dragCard(page, S.Drag.sec) end
+    elseif S.Drag.mode == "cardsize" and S.Drag.sec then
+        local page = S.curPage()
+        if page then S.resizeCard(page, S.Drag.sec) end
+    elseif S.Drag.mode == "move" then
         S.Win.x, S.Win.y = S.clampRect(S.In.x - S.Drag.ox, S.In.y - S.Drag.oy, S.Win.w, S.Win.h)
         S.Win.dirty = true
     elseif S.Drag.mode == "resize" then

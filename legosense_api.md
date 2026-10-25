@@ -54,6 +54,10 @@ local sec = tab:CreateSection("Aimbot", "left")    -- title, side: "left" | "rig
 - `Window:CreateGroupbox` is an alias for `CreateSection`.
 - Grab an existing tab by name/index: `Library:Tab("Settings")` or `Library:Tab(1)`.
 
+### Card layout editor
+
+The pencil left of the search bar toggles edit mode. While editing, drag any card to move it (reorder, or switch column) and drag the grip on its bottom-right corner to resize it (snaps to one column or full width). "Reset" restores the tab's original layout. Layouts are saved per tab with the UI state and matched by card title, so keep titles unique within a tab.
+
 ### Sub-tabs inside a card
 
 ```lua
