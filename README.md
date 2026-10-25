@@ -56,7 +56,7 @@ local sec = tab:CreateSection("Aimbot", "left")    -- title, side: "left" | "rig
 
 ### Card layout editor
 
-The pencil left of the search bar toggles edit mode. While editing, drag any card to move it (reorder, or switch column) and drag the grip on its bottom-right corner to resize it (snaps to one column or full width). "Reset" restores the tab's original layout. Layouts are saved per tab with the UI state and matched by card title, so keep titles unique within a tab.
+The pencil left of the search bar toggles edit mode. Cards keep the normal two-column layout: while editing, drag a card to any spot in either column (it floats under the mouse, the others make room, and it glides into place on release), and drag the grip on its bottom-right corner to make it taller or shorter. A card shorter than its content scrolls inside with the wheel. Everything animates (instant with Animations off). "Reset" puts the tab back to the script's own layout. Layouts are saved per tab with the UI state and matched by card title, so keep titles unique within a tab.
 
 ### Sub-tabs inside a card
 

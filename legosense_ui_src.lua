@@ -921,8 +921,10 @@ function S.addSection(tabIdx, title, side)
         hsegs= S.NewFadeSegs(33),
         panel= S.New("Square", { Filled = true, Color = S.Theme.Panel, Transparency = S.Const.ALPHA_CARD, ZIndex = 31, Corner = 6, Visible = false }),
         glow = S.New("Square", { Filled = false, Color = S.Theme.C1, Transparency = 0, ZIndex = 32, Corner = 6, Visible = false }),
-        -- layout editor: resize grip (bottom-right), creation order + original side for Reset
+        -- layout editor: resize grip (bottom-right); ci = creation order, for Reset
         grip = S.New("Square", { Filled = true, Color = S.Theme.C1, Transparency = 0.9, ZIndex = 36, Corner = 2, Visible = false, Size = Vector2.new(10, 10) }),
+        -- scroll thumb for a card made shorter than its content
+        sbT = S.New("Square", { Filled = true, Color = S.Theme.C1, Transparency = 0.8, ZIndex = 36, Corner = 2, Visible = false }),
         ci = #S.Pages[tabIdx].sections + 1, side0 = side,
     }
     table.insert(S.Pages[tabIdx].sections, sec)
@@ -949,17 +951,20 @@ function S.uiStateSnapshot(t)
     table.sort(list)
     t._collapsed = list
     t._subtabs = subs
-    -- card layout: only tabs the user arranged (or arranged before), so script changes to other tabs still show
+    -- card layout: only tabs the user arranged (the rest keep the script's own 2-column flow)
     local lay = {}
     local old = type(S.Persisted._layout) == "table" and S.Persisted._layout or {}
+    local present = {}
     for idx, page in pairs(S.Pages) do
         local name = S.tabNameOf(idx)
-        if page.edited or old[name] then
+        present[name] = true
+        if page.custom then
             local l = {}
-            for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.wide == true } end
+            for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.fh or false } end
             lay[name] = l
         end
     end
+    for name, l in pairs(old) do if not present[name] then lay[name] = l end end -- tabs this script didn't make
     t._layout = lay
     S.Persisted._layout = lay
     t._tab = S.tabNameOf(S.activeTab)
@@ -1144,6 +1149,7 @@ function S.setPageVisible(tabIdx, v)
         sec.panel.Visible = v
         sec.glow.Visible = false
         sec.grip.Visible = false
+        sec.sbT.Visible = false
         for _, row in ipairs(sec.rows) do
             local rv = v and (row.showT == nil or row.showT > 0.02) -- hidden sub-tab / conditional rows stay hidden
             for _, o in ipairs(S.rowObjs(row)) do o.Visible = rv end
@@ -1153,9 +1159,13 @@ function S.setPageVisible(tabIdx, v)
 end
 
 -- ========== card layout editor ==========
--- S.LayoutEdit (pencil next to the search bar): drag a card to move it, drag its corner grip to resize
--- (snaps to one column or full width). Saved per tab as "_layout" = { Tab = { {title, side, wide}, ... } }.
+-- S.LayoutEdit (pencil next to the search bar). Cards keep the normal two-column layout; while editing you can drag
+-- a card to any spot in either column (the others make room, everything eases into place) and drag its bottom-right
+-- grip to make it taller or shorter (fh, panel px; nil = fit the content). The first edit marks the tab page.custom.
+-- Saved per tab as "_layout" = { Tab = { {title, side, fh or false}, ... } } in order. Untouched tabs keep the script's layout.
 S.LayoutEdit = false
+S.Const.CARD_MIN_H = 40
+
 -- apply the saved layout once the tab's card count changes (cards are added after the settings load)
 function S.applyLayout(tabIdx, page)
     page.layoutN = #page.sections
@@ -1163,10 +1173,16 @@ function S.applyLayout(tabIdx, page)
     if type(saved) ~= "table" then return end
     -- shortcut: matched by card title, so two cards with the same title in one tab share a slot; use unique titles
     local rank = {}
-    for i, e in ipairs(saved) do if type(e) == "table" and e[1] then rank[e[1]] = { i, e[2], e[3] } end end
+    for i, e in ipairs(saved) do
+        -- earlier test builds saved numbers in [2]; only {title, "left"/"right", fh} is used
+        if type(e) == "table" and (e[2] == "left" or e[2] == "right") then
+            rank[e[1]] = { i, e[2], type(e[3]) == "number" and e[3] or nil }
+        end
+    end
+    if next(rank) == nil then return end
     for _, sec in ipairs(page.sections) do
         local r = rank[tostring(sec.title)]
-        if r then sec.side = (r[2] == "right") and "right" or "left" sec.wide = r[3] == true end
+        if r then sec.side, sec.fh = r[2], r[3] end
     end
     table.sort(page.sections, function(a, b)
         local ra, rb = rank[tostring(a.title)], rank[tostring(b.title)]
@@ -1174,51 +1190,72 @@ function S.applyLayout(tabIdx, page)
         if (ra == nil) ~= (rb == nil) then return ra ~= nil end -- cards the save doesn't know go last
         return a.ci < b.ci
     end)
+    page.custom = true
 end
 function S.resetLayout(tabIdx)
     local page = S.Pages[tabIdx]
     if not page then return end
-    for _, sec in ipairs(page.sections) do sec.side, sec.wide = sec.side0, false end
+    for _, sec in ipairs(page.sections) do sec.side, sec.fh, sec.scroll = sec.side0, nil, 0 end
     table.sort(page.sections, function(a, b) return a.ci < b.ci end)
-    page.edited = false
+    page.custom = false
     if type(S.Persisted._layout) == "table" then S.Persisted._layout[S.tabNameOf(tabIdx)] = nil end
     S.markChanged()
     S.Win.dirty = true
 end
--- while dragging a card: column from the mouse x, slot = before the first card in that column whose top is below the mouse
-function S.dragCard(page, sec)
+-- dragging: the card floats under the mouse. Its column is the side of the content the mouse is on; its spot is
+-- decided by which neighbours it covers by half (see below).
+function S.moveCard(page, sec)
     local g = page.geo
     if not g then return end
-    local side = sec.side
-    if not sec.wide then side = (S.In.x < g.cx + g.cw / 2) and "left" or "right" end
+    page.custom = true
+    if S.In.x == S.Drag.lastX and S.In.y == S.Drag.lastY then return end
+    S.Drag.lastX, S.Drag.lastY = S.In.x, S.In.y
+    S.Win.dirty = true
+    local fTop = S.In.y - S.Drag.cardOy - g.startY
+    local fBot = fTop + (sec.lay and sec.lay.h or 0)
+    local side = (S.In.x < g.cx + g.cw / 2) and "left" or "right"
+    local idxOf = {}
+    for i, s in ipairs(page.sections) do idxOf[s] = i end
     local others = {}
     for _, s in ipairs(page.sections) do if s ~= sec then others[#others + 1] = s end end
-    local top = S.In.y - (S.Drag.cardOy or 0) -- where the dragged card's header would be
+    -- swap as soon as the floating card covers half of a neighbour: going up, its top passes their middle;
+    -- going down, its bottom does. Into the other column: its middle decides.
     local at = #others + 1
     for i, s in ipairs(others) do
-        if (sec.wide or s.wide or s.side == side) and s.headRect and s.headRect.y > top then at = i break end
+        if s.side == side and s.lay then
+            local mid = s.lay.y + (s.lay.h or 0) / 2
+            local before
+            if side ~= sec.side then before = (fTop + fBot) / 2 < mid
+            elseif idxOf[s] < idxOf[sec] then before = fTop < mid
+            else before = fBot <= mid end
+            if before then at = i break end
+        end
     end
     table.insert(others, at, sec)
     local changed = side ~= sec.side
-    for i, s in ipairs(others) do if page.sections[i] ~= s then changed = true end end
-    if changed then
-        page.sections = others
-        sec.side = side
-        page.edited = true
-        S.Win.dirty = true
+    for i, s in ipairs(others) do if page.sections[i] ~= s then changed = true break end end
+    if changed then page.sections, sec.side = others, side end
+end
+-- lift a card above the others while it's dragged (add = 20), put it back after (add = 0)
+S.ZBase = {}
+function S.cardZ(sec, add)
+    local objs = { sec.panel, sec.glow, sec.hdr, sec.grip, sec.sbT }
+    for _, s in ipairs(sec.hsegs) do objs[#objs + 1] = s end
+    for _, row in ipairs(sec.rows) do for _, o in ipairs(S.rowObjs(row)) do objs[#objs + 1] = o end end
+    for _, o in ipairs(objs) do
+        if S.ZBase[o] == nil then S.ZBase[o] = o.ZIndex end
+        o.ZIndex = S.ZBase[o] + add
     end
 end
+-- grip: taller or shorter; snaps back to "fit content" within 10 px of it
 function S.resizeCard(page, sec)
     local g = page.geo
-    if not g then return end
-    local left = sec.wide and g.cx or (g.colX[sec.side] or g.cx)
-    local want = S.In.x - left
-    local wide = math.abs(want - g.cw) < math.abs(want - g.colW)
-    if wide ~= (sec.wide == true) then
-        sec.wide = wide
-        page.edited = true
-        S.Win.dirty = true
-    end
+    if not g or not sec.lay then return end
+    page.custom = true
+    local h = math.max(S.Const.CARD_MIN_H, math.floor(S.In.y - (g.startY + sec.lay.y + 18) + 6))
+    local fh = h
+    if sec.fitH and math.abs(h - sec.fitH) < 10 then fh = nil end
+    if fh ~= sec.fh then sec.fh = fh S.Win.dirty = true end
 end
 
 -- ========== config system (clean, sorted JSON) ==========
@@ -1910,13 +1947,31 @@ function S.relayoutRaw()
         local colX = { left = cx, right = cx + colW + colGap }
         local colY = { left = startY, right = startY }
         if page.layoutN ~= #page.sections then S.applyLayout(S.activeTab, page) end
-        page.geo = { cx = cx, cw = cw, colW = colW, colX = colX }
+        page.geo = { cx = cx, cw = cw, colW = colW, colX = colX, startY = startY }
+        -- card motion: every card eases toward its target rect (relative to the content origin, so scrolling and
+        -- moving the window never lag); the card under the mouse and window resizes stay 1:1
+        local cardK = S.animOn() and (1 - (0.0000005 ^ (S.frameDt or 1 / 60))) or 1
 
         for _, sec in ipairs(page.sections) do
-            local sx = colX[sec.side] or cx
-            local sy = colY[sec.side] or startY
-            local swid = colW
-            if sec.wide then sx, sy, swid = cx, math.max(colY.left, colY.right), cw end
+            local sx, sy, swid = colX[sec.side] or cx, colY[sec.side] or startY, colW
+            local tsy = sy
+            sec.lay = { x = sx - cx, y = sy - startY, w = swid, h = sec.lay and sec.lay.h or 0 }
+            -- the card being dragged floats under the mouse; its column spot (kept free above) is where it lands
+            if S.Drag.mode == "card" and S.Drag.sec == sec then sx, sy = S.In.x - S.Drag.cardOx, S.In.y - S.Drag.cardOy end
+            local instant = sec.ax == nil or cardK >= 1 or S.Drag.sec == sec or S.Drag.mode == "resize"
+            if instant then
+                sec.ax, sec.ay, sec.aw = sx - cx, sy - startY, swid
+            else
+                sec.ax = sec.ax + (sx - cx - sec.ax) * cardK
+                sec.ay = sec.ay + (sy - startY - sec.ay) * cardK
+                sec.aw = sec.aw + (swid - sec.aw) * cardK
+                if math.abs(sec.ax - (sx - cx)) + math.abs(sec.ay - (sy - startY)) + math.abs(sec.aw - swid) < 0.6 then
+                    sec.ax, sec.ay, sec.aw = sx - cx, sy - startY, swid
+                else
+                    S.cardAnim = true
+                end
+            end
+            sx, sy, swid = math.floor(cx + sec.ax + 0.5), math.floor(startY + sec.ay + 0.5), math.floor(sec.aw + 0.5)
 
             local hdrVis = sy >= visTop - 2 and sy <= visBot - 12
             sec.hdr.Visible = S.Win.visible and hdrVis
@@ -1952,7 +2007,23 @@ function S.relayoutRaw()
             end
             local rowsSum = 0
             for _, row in ipairs(sec.rows) do rowsSum = rowsSum + S.rowEffH(row) end
-            local panelH = (rowsSum + 14) * colTs
+            -- custom height (fh): eases like the rect; content taller than the card scrolls inside it (wheel)
+            sec.fitH = rowsSum + 14
+            local panelH
+            if sec.fh and page.custom then
+                local th = sec.fh * colTs
+                if sec.ah == nil or cardK >= 1 or S.Drag.sec == sec then sec.ah = th
+                else
+                    sec.ah = sec.ah + (th - sec.ah) * cardK
+                    if math.abs(sec.ah - th) < 0.6 then sec.ah = th else S.cardAnim = true end
+                end
+                panelH = math.floor(sec.ah + 0.5)
+                sec.scroll = math.max(0, math.min(sec.scroll or 0, sec.fitH - sec.fh))
+            else
+                panelH = sec.fitH * colTs
+                sec.ah, sec.scroll = panelH, 0
+            end
+            local clipCard = sec.fh ~= nil and page.custom
             local pTop = math.max(py, visTop)
             local pBot = math.min(py + panelH, visBot)
             local panelShown = pBot - pTop > 3
@@ -1968,21 +2039,39 @@ function S.relayoutRaw()
                 sec.glow.Corner = S.CR(6)
             end
             sec.rect = { x = sx, y = pTop, w = swid, h = math.max(0, pBot - pTop) }
-            -- resize grip sits on the card's bottom-right corner (only while editing and the corner is on screen)
+            -- resize grip on the bottom-right corner (width and height)
             local gy = py + panelH - 12
             local gripShown = S.LayoutEdit and S.Win.visible and gy >= visTop and gy + 10 <= visBot
             sec.grip.Visible = gripShown
-            sec.gripRect = gripShown and { x = sx + swid - 16, y = gy - 4, w = 18, h = 18 } or nil
-            if gripShown then sec.grip.Position = Vector2.new(sx + swid - 12, gy) sec.grip.Color = S.Theme.C1 end
+            local gx = sx + swid - 12
+            sec.gripRect = gripShown and { x = gx - 4, y = gy - 4, w = 18, h = 18 } or nil
+            if gripShown then sec.grip.Position = Vector2.new(gx, gy) sec.grip.Color = S.Theme.C1 end
+            -- scrollbar: a thin thumb on the right edge when the content is taller than the card
+            local over = clipCard and sec.fitH - sec.fh or 0
+            if over > 1 and panelShown then
+                local track = panelH - 12
+                local th = math.max(16, math.floor(track * sec.fh / sec.fitH))
+                local ty = py + 6 + math.floor((sec.scroll or 0) / over * (track - th))
+                sec.sbT.Position = Vector2.new(sx + swid - 6, ty)
+                sec.sbT.Size = Vector2.new(3, th)
+                sec.sbT.Color = S.Theme.C1
+                sec.sbT.Visible = S.Win.visible
+                sec.sbGeo = { x = sx + swid - 12, top = py + 6, track = track, th = th, ty = ty, over = over }
+            else
+                sec.sbT.Visible = false
+                sec.sbGeo = nil
+            end
 
-            local ry = py + 8
+            local ry = py + 8 - (sec.scroll or 0)
+            local cTop, cBot = py + 2, py + panelH - 3
             for _, row in ipairs(sec.rows) do
+                row.cTop, row.cBot = clipCard and cTop or nil, clipCard and cBot or nil
                 -- render any row that overlaps the viewport at full opacity; the clip pass
                 -- (clipRows, run each frame) trims each object to the exact viewport edge so the
                 -- part outside is invisible and the part inside stays crisp, revealed pixel by pixel.
                 -- lay out (and keep Visible) a generous margin past the edge so nothing toggles
                 -- Visible right at the boundary; clipRows does the exact hide/fade -> no 3px pop.
-                local rvis = (ry + row.h > visTop) and (ry < visBot)
+                local rvis = (ry + row.h > visTop) and (ry < visBot) and (not clipCard or (ry + row.h > cTop + 6 and ry < cBot - 6))
                 local shownEnough = (row.showT == nil) or (row.showT > 0.02)
                 local rlive = shownEnough and (ry + row.h > visTop - 60) and (ry < visBot + 60)
                 row.vis = rvis and shownEnough and colTs > 0.5
@@ -2143,7 +2232,13 @@ function S.relayoutRaw()
                 end
                 ry = ry + S.rowEffH(row) * colTs
             end
-            if sec.wide then colY.left, colY.right = ry + 30, ry + 30 else colY[sec.side] = ry + 30 end
+            -- next card in the column starts below this card's target spot (not the animated or floating one)
+            if sec.fh and page.custom then
+                colY[sec.side] = tsy + 48 + sec.fh * colTs
+            else
+                colY[sec.side] = tsy + 56 + rowsSum * colTs
+            end
+            sec.lay.h = colY[sec.side] - tsy - 30
         end
 
         -- scroll bookkeeping
@@ -2376,7 +2471,9 @@ function S.relayoutRaw()
         S.Search.geom = nil
     end
 
-    S.Win.dirty = false
+    -- a card still easing into place needs the next frame too (setting dirty during the layout would be cleared here)
+    S.Win.dirty = S.cardAnim == true
+    S.cardAnim = false
 end
 
 function S.relayout()
@@ -2986,6 +3083,16 @@ function S.curPage() return S.Pages[S.activeTab] end
 
 function S.doScroll(d)
     local page = S.curPage()
+    if page and S.Win.visible and page.custom then
+        -- over a card that's shorter than its content: scroll the card, not the page
+        for _, sec in ipairs(page.sections) do
+            local r = sec.rect
+            if sec.fh and sec.fitH and sec.fitH > sec.fh and r and S.inRect(S.In.x, S.In.y, r.x, r.y, r.w, r.h) then
+                local s = math.max(0, math.min(sec.fitH - sec.fh, (sec.scroll or 0) + d))
+                if s ~= sec.scroll then sec.scroll = s S.Win.dirty = true return end
+            end
+        end
+    end
     if page and S.Win.visible then
         page.scrollY = math.max(0, math.min((page.maxScroll or 0), page.scrollY + d))
         S.wheelPulse = 0.45
@@ -3058,10 +3165,13 @@ function S.clipRows()
     local bot = S.Win.y + S.Win.h - 6
     for _, sec in ipairs(page.sections) do
         S.clipObj(sec.hdr, top, bot)
+        S.clipObj(sec.sbT, top, bot)
         for _, row in ipairs(sec.rows) do
             if row.live then
                 local mul = row.clipMul or 1
-                for _, o in ipairs(S.rowObjs(row)) do S.clipObj(o, top, bot, mul) end
+                -- rows of a card with a custom height are also cut to the card
+                local t2, b2 = math.max(top, row.cTop or top), math.min(bot, row.cBot or bot)
+                for _, o in ipairs(S.rowObjs(row)) do S.clipObj(o, t2, b2, mul) end
             end
         end
     end
@@ -3071,6 +3181,7 @@ function S.frame()
     local now = os.clock()
     local dt = math.min(now - S.lastClock, 0.1)
     S.lastClock = now
+    S.frameDt = dt
     S.runT = S.runT + dt
 
     if S.mouse then S.In.x, S.In.y = S.mouse.X, S.mouse.Y end
@@ -3382,7 +3493,19 @@ function S.frame()
             else
                 local handled = false
                 local page = S.Pages[S.activeTab]
-                if page and S.LayoutEdit and S.In.y > y + S.TB then
+                -- a card's own scrollbar (cards made shorter than their content)
+                if page and S.In.y > y + S.TB then
+                    for _, sec in ipairs(page.sections) do
+                        local g2 = sec.sbGeo
+                        if g2 and S.inRect(S.In.x, S.In.y, g2.x, g2.top, 14, g2.track) then
+                            S.Drag.mode, S.Drag.sbSec = "cardsb", sec
+                            S.Drag.sbOff = (S.In.y >= g2.ty and S.In.y <= g2.ty + g2.th) and (S.In.y - g2.ty) or g2.th / 2
+                            handled = true
+                            break
+                        end
+                    end
+                end
+                if page and S.LayoutEdit and not handled and S.In.y > y + S.TB then
                     -- editing: the grip resizes, anywhere else on a card (header or body) moves it; rows don't react
                     for _, sec in ipairs(page.sections) do
                         local gr, hr, r = sec.gripRect, sec.headRect, sec.rect
@@ -3391,7 +3514,10 @@ function S.frame()
                             handled = true
                             break
                         elseif (hr and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h)) or (r and sec.vis and S.inRect(S.In.x, S.In.y, r.x, r.y, r.w, r.h)) then
-                            S.Drag.mode, S.Drag.sec, S.Drag.cardOy = "card", sec, S.In.y - hr.y
+                            S.Drag.mode, S.Drag.sec = "card", sec
+                            S.Drag.cardOx, S.Drag.cardOy = S.In.x - hr.x, S.In.y - (hr.y + 2)
+                            S.Drag.lastX, S.Drag.lastY = nil, nil
+                            S.cardZ(sec, 20)
                             handled = true
                             break
                         end
@@ -3500,19 +3626,26 @@ function S.frame()
             local page = S.curPage()
             if page then page.momentum = S.Drag.vel or 0 end
         end
+        if S.Drag.mode == "card" and S.Drag.sec then S.cardZ(S.Drag.sec, 0) end
         if S.Drag.sec then S.markChanged() S.Win.dirty = true end
         S.Drag.mode = nil
         S.Drag.row = nil
         S.Drag.sec = nil
+        S.Drag.sbSec = nil
         S.Drag.vel = 0
     end
 
     if S.Drag.mode == "card" and S.Drag.sec then
         local page = S.curPage()
-        if page then S.dragCard(page, S.Drag.sec) end
+        if page then S.moveCard(page, S.Drag.sec) end
     elseif S.Drag.mode == "cardsize" and S.Drag.sec then
         local page = S.curPage()
         if page then S.resizeCard(page, S.Drag.sec) end
+    elseif S.Drag.mode == "cardsb" and S.Drag.sbSec and S.Drag.sbSec.sbGeo then
+        local sec, g2 = S.Drag.sbSec, S.Drag.sbSec.sbGeo
+        local t = (S.In.y - S.Drag.sbOff - g2.top) / math.max(1, g2.track - g2.th)
+        local s = math.max(0, math.min(1, t)) * g2.over
+        if s ~= sec.scroll then sec.scroll = s S.Win.dirty = true end
     elseif S.Drag.mode == "move" then
         S.Win.x, S.Win.y = S.clampRect(S.In.x - S.Drag.ox, S.In.y - S.Drag.oy, S.Win.w, S.Win.h)
         S.Win.dirty = true
