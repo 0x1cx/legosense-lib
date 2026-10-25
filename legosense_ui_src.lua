@@ -2634,6 +2634,14 @@ end
 -- drag one by its header while the menu is open; positions are saved with the settings.
 S.Overlays = {}
 S.Const.OV_ROW, S.Const.OV_PAD, S.Const.OV_HEAD = 18, 9, 24
+-- every UI panel (window + overlays) keeps this gap to each screen edge; same as an overlay's default x
+S.Const.EDGE = 24
+function S.clampRect(x, y, w, h)
+    local vp = S.vp
+    if not vp then return x, y end
+    local m = S.Const.EDGE
+    return math.clamp(x, m, math.max(m, vp.X - w - m)), math.clamp(y, m, math.max(m, vp.Y - h - m))
+end
 S.Overlay = {}
 S.Overlay.__index = S.Overlay
 
@@ -2691,7 +2699,9 @@ function S.layoutOverlay(ov)
     for _, r in ipairs(list) do w = math.max(w, (#r.l + #r.r) * S.CHAR_W + pad * 2 + 22) end
     local h = headH + #list * rowH + 6
     ov.w, ov.h = w, h
-    local x, y = math.floor(ov.x), math.floor(ov.y)
+    -- drawn position is clamped, ov.x/ov.y stay as placed, so a panel that grew and got pushed in returns when it shrinks
+    local x, y = S.clampRect(math.floor(ov.x), math.floor(ov.y), w, h)
+    ov.dx, ov.dy = x, y
     ov.bg.Visible, ov.edge.Visible, ov.accent.Visible, ov.head.Visible = show, show, show, show
     if show then
         ov.bg.Position, ov.bg.Size, ov.bg.Color, ov.bg.Corner = Vector2.new(x, y), Vector2.new(w, h), S.Theme.Dark, S.CR(5)
@@ -2755,16 +2765,18 @@ function S.updateOverlays(dt)
             ov.dirty = true
         end
         if ov.theme ~= themeKey or ov.themeC1 ~= S.Theme.C1 then ov.theme, ov.themeC1 = themeKey, S.Theme.C1 ov.dirty = true end
+        if S.vpChanged then ov.dirty = true end
         -- drag by the header, only while the menu is open (mouse input belongs to the game otherwise)
         if ov.visible and S.Win.visible and ov.w then
-            if S.In.pressed and not S.ovDrag and S.inRect(S.In.x, S.In.y, ov.x, ov.y, ov.w, S.Const.OV_HEAD)
+            local hx, hy = ov.dx or ov.x, ov.dy or ov.y
+            if S.In.pressed and not S.ovDrag and S.inRect(S.In.x, S.In.y, hx, hy, ov.w, S.Const.OV_HEAD)
                 and not S.inRect(S.In.x, S.In.y, S.Win.x, S.Win.y, S.Win.w, S.Win.h) then
-                S.ovDrag = { ov = ov, ox = S.In.x - ov.x, oy = S.In.y - ov.y }
+                S.ovDrag = { ov = ov, ox = S.In.x - hx, oy = S.In.y - hy }
             end
         end
         if S.ovDrag and S.ovDrag.ov == ov then
             if S.In.down then
-                ov.x, ov.y = S.In.x - S.ovDrag.ox, S.In.y - S.ovDrag.oy
+                ov.x, ov.y = S.clampRect(S.In.x - S.ovDrag.ox, S.In.y - S.ovDrag.oy, ov.w or 0, ov.h or 0)
                 ov.dirty = true
             else
                 S.ovDrag = nil
@@ -2904,6 +2916,21 @@ function S.frame()
     S.In.down = ismouse1pressed()
     S.In.pressed = S.In.down and not S.In.wasDown
     S.In.released = (not S.In.down) and S.In.wasDown
+
+    local okVp, vp = pcall(function() return workspace.CurrentCamera.ViewportSize end)
+    S.vpChanged = okVp and vp ~= nil and (not S.vp or vp.X ~= S.vp.X or vp.Y ~= S.vp.Y)
+    if S.vpChanged then S.vp = vp end
+    -- window: never bigger than the screen minus the edge gap, never past it (covers drags, resizes, loaded configs, screen changes)
+    if S.vp then
+        local m = S.Const.EDGE
+        local w = math.max(S.Const.MIN_W, math.min(S.Win.w, S.vp.X - m * 2))
+        local h = math.max(S.Const.MIN_H, math.min(S.Win.h, S.vp.Y - m * 2))
+        local x, y = S.clampRect(S.Win.x, S.Win.y, w, h)
+        if x ~= S.Win.x or y ~= S.Win.y or w ~= S.Win.w or h ~= S.Win.h then
+            S.Win.x, S.Win.y, S.Win.w, S.Win.h = x, y, w, h
+            S.Win.dirty = true
+        end
+    end
 
     if UI.created and not S.Capture.row and not S.Focus.row and not S.Pick.hexFocus and not S.Drop.open and not S.Search.active then
         local k = iskeypressed(S.Cfg.menuKey)
@@ -3282,11 +3309,14 @@ function S.frame()
     end
 
     if S.Drag.mode == "move" then
-        S.Win.x, S.Win.y = S.In.x - S.Drag.ox, S.In.y - S.Drag.oy
+        S.Win.x, S.Win.y = S.clampRect(S.In.x - S.Drag.ox, S.In.y - S.Drag.oy, S.Win.w, S.Win.h)
         S.Win.dirty = true
     elseif S.Drag.mode == "resize" then
-        local newW = math.max(S.Const.MIN_W, S.In.x - S.Win.x + 8)
-        local newH = math.max(S.Const.MIN_H, S.In.y - S.Win.y + 8)
+        local m = S.Const.EDGE
+        local maxW = S.vp and S.vp.X - m - S.Win.x or math.huge
+        local maxH = S.vp and S.vp.Y - m - S.Win.y or math.huge
+        local newW = math.max(S.Const.MIN_W, math.min(maxW, S.In.x - S.Win.x + 8))
+        local newH = math.max(S.Const.MIN_H, math.min(maxH, S.In.y - S.Win.y + 8))
         if newW ~= S.Win.w or newH ~= S.Win.h then
             S.Win.w, S.Win.h = newW, newH
             S.Win.dirty = true
