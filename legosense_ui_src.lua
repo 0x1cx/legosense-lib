@@ -378,7 +378,7 @@ end
 
 S.KEYNAMES = { [0x08] = "Bksp", [0x09] = "Tab", [0x0D] = "Enter", [0x10] = "Shift", [0x11] = "Ctrl", [0x12] = "Alt",
     [0x1B] = "Esc", [0x20] = "Space", [0x21] = "PgUp", [0x22] = "PgDn", [0x23] = "End", [0x24] = "Home",
-    [0x25] = "Left", [0x26] = "Up", [0x27] = "Right", [0x28] = "Down", [0x2D] = "Ins", [0x2E] = "Del", [-2] = "MB2" }
+    [0x25] = "Left", [0x26] = "Up", [0x27] = "Right", [0x28] = "Down", [0x2D] = "Ins", [0x2E] = "Del", [-2] = "MB2", [0x01] = "MB1" }
 for i = 0x30, 0x39 do S.KEYNAMES[i] = string.char(i) end
 for i = 0x41, 0x5A do S.KEYNAMES[i] = string.char(i) end
 for i = 0x70, 0x7B do S.KEYNAMES[i] = "F" .. (i - 0x6F) end
@@ -958,9 +958,9 @@ function S.uiStateSnapshot(t)
     for idx, page in pairs(S.Pages) do
         local name = S.tabNameOf(idx)
         present[name] = true
-        if page.custom then
+        if page.custom and idx ~= S.SETTINGS_TAB then
             local l = {}
-            for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.fh or false } end
+            for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.fh or false, sec.fw or false } end
             lay[name] = l
         end
     end
@@ -1169,6 +1169,7 @@ S.Const.CARD_MIN_H = 40
 -- apply the saved layout once the tab's card count changes (cards are added after the settings load)
 function S.applyLayout(tabIdx, page)
     page.layoutN = #page.sections
+    if tabIdx == S.SETTINGS_TAB then return end -- Settings keeps its built-in layout
     local saved = type(S.Persisted._layout) == "table" and S.Persisted._layout[S.tabNameOf(tabIdx)]
     if type(saved) ~= "table" then return end
     -- shortcut: matched by card title, so two cards with the same title in one tab share a slot; use unique titles
@@ -1176,13 +1177,13 @@ function S.applyLayout(tabIdx, page)
     for i, e in ipairs(saved) do
         -- earlier test builds saved numbers in [2]; only {title, "left"/"right", fh} is used
         if type(e) == "table" and (e[2] == "left" or e[2] == "right") then
-            rank[e[1]] = { i, e[2], type(e[3]) == "number" and e[3] or nil }
+            rank[e[1]] = { i, e[2], type(e[3]) == "number" and e[3] or nil, type(e[4]) == "number" and e[4] or nil }
         end
     end
     if next(rank) == nil then return end
     for _, sec in ipairs(page.sections) do
         local r = rank[tostring(sec.title)]
-        if r then sec.side, sec.fh = r[2], r[3] end
+        if r then sec.side, sec.fh, sec.fw = r[2], r[3], r[4] end
     end
     table.sort(page.sections, function(a, b)
         local ra, rb = rank[tostring(a.title)], rank[tostring(b.title)]
@@ -1195,7 +1196,7 @@ end
 function S.resetLayout(tabIdx)
     local page = S.Pages[tabIdx]
     if not page then return end
-    for _, sec in ipairs(page.sections) do sec.side, sec.fh, sec.scroll = sec.side0, nil, 0 end
+    for _, sec in ipairs(page.sections) do sec.side, sec.fh, sec.fw, sec.scroll = sec.side0, nil, nil, 0 end
     table.sort(page.sections, function(a, b) return a.ci < b.ci end)
     page.custom = false
     if type(S.Persisted._layout) == "table" then S.Persisted._layout[S.tabNameOf(tabIdx)] = nil end
@@ -1247,7 +1248,10 @@ function S.cardZ(sec, add)
         o.ZIndex = S.ZBase[o] + add
     end
 end
--- grip: taller or shorter; snaps back to "fit content" within 10 px of it
+-- grip: height (snaps back to "fit content" within 10 px) and width. Width is fw = share of the content width, so it
+-- follows window resizes; it snaps to the normal column width (nil) or full width (1) within 12 px. Wider than a
+-- column = the card spans both columns and the other column's cards move below it.
+S.Const.CARD_MIN_W = 180
 function S.resizeCard(page, sec)
     local g = page.geo
     if not g or not sec.lay then return end
@@ -1255,7 +1259,24 @@ function S.resizeCard(page, sec)
     local h = math.max(S.Const.CARD_MIN_H, math.floor(S.In.y - (g.startY + sec.lay.y + 18) + 6))
     local fh = h
     if sec.fitH and math.abs(h - sec.fitH) < 10 then fh = nil end
-    if fh ~= sec.fh then sec.fh = fh S.Win.dirty = true end
+    -- width from how far the mouse moved since the grab (a right-column card grows leftward once it hits the edge)
+    local w = (S.Drag.w0 or sec.lay.w) + S.In.x - (S.Drag.x0 or S.In.x)
+    w = math.max(math.min(S.Const.CARD_MIN_W, g.cw), math.min(g.cw, w))
+    local fw = w / g.cw
+    if math.abs(w - g.colW) < 12 then fw = nil elseif g.cw - w < 12 then fw = 1 end
+    if fh ~= sec.fh or fw ~= sec.fw then sec.fh, sec.fw = fh, fw S.Win.dirty = true end
+end
+do -- self-check: a 600 px content area, 289 px columns; dragging the grip 30 px right from the column width
+    local sv = { In = S.In, Drag = S.Drag, dirty = S.Win.dirty }
+    local sec = { lay = { y = 0, w = 289 } }
+    S.In, S.Drag = { x = 130, y = 100 }, { w0 = 289, x0 = 100 }
+    S.resizeCard({ geo = { cw = 600, colW = 289, startY = 0 } }, sec)
+    assert(sec.fw and math.abs(sec.fw - 319 / 600) < 1e-6, "resizeCard width")
+    S.In.x = 105 S.resizeCard({ geo = { cw = 600, colW = 289, startY = 0 } }, sec)
+    assert(sec.fw == nil, "resizeCard snaps to column width")
+    S.In.x = 400 S.resizeCard({ geo = { cw = 600, colW = 289, startY = 0 } }, sec)
+    assert(sec.fw == 1, "resizeCard snaps to full width")
+    S.In, S.Drag, S.Win.dirty = sv.In, sv.Drag, sv.dirty
 end
 
 -- ========== config system (clean, sorted JSON) ==========
@@ -1603,6 +1624,7 @@ do
         pcall(setrobloxinput, not (v and S.Win.visible)) -- apply now if the menu is open
         S.markChanged()
     end).tip = "Stop Matcha's input reaching the game while the menu is open"
+    S.addToggle(sIface, "Streamer mode", false, "streamer", function(v) S.Cfg.streamer = v S.Win.dirty = true S.markChanged() end).tip = "Hides your avatar and name, and every player's name the script shows (Library:IsStreamer())"
     S.addToggle(sIface, "Hover effects", true, "hoverFx", function(v) S.Cfg.hoverFx = v S.markChanged() end)
     S.addToggle(sIface, "Checkbox style", false, "checkbox", function(v) S.Cfg.checkbox = v S.Win.dirty = true S.markChanged() end).tip = "Square checkboxes instead of pills"
     S.addToggle(sIface, "Collapse sidebar", false, "collapseSidebar", function(v) S.Cfg.collapseSidebar = v S.markChanged() end).tip = "Pin the sidebar closed (no hover expand)"
@@ -1749,8 +1771,10 @@ function S.relayoutRaw()
     S.D.topbar.Color = S.Theme.Dark
     -- Rainbow theme: sidebar + topbar both at a matching 0.9 so the busy bg reads cleaner
     local barA = (S.Cfg.preset == "Rainbow") and 0.9 or S.Const.ALPHA_BAR
-    S.D.sidebar.Transparency = barA * S.Cfg.opacity
-    S.D.topbar.Transparency = barA * S.Cfg.opacity
+    -- the open sidebar sits over the game: fade it (and the top bar, so they match) toward solid as it expands
+    local openA = (barA + (0.95 - barA) * math.max(0, math.min(1, expandT))) * S.Cfg.opacity
+    S.D.sidebar.Transparency = openA
+    S.D.topbar.Transparency = openA
     S.D.search.Color = S.Theme.Panel
     S.D.avCirc.Color = S.Theme.Control
     S.D.logo.Position = Vector2.new(x + 12, y + 6)
@@ -1865,12 +1889,14 @@ function S.relayoutRaw()
 
     S.D.avCirc.Position = Vector2.new(x + 28, y + h - 36)
     S.D.avatar.Position = Vector2.new(x + 10, y + h - 54)
+    -- streamer mode: no avatar (the empty circle stays) and no name
+    S.D.avatar.Visible = S.Win.visible and not S.Cfg.streamer
     local nameAvail = sw - 52 - 34
     S.D.footName.Position = Vector2.new(x + 52, y + h - 46)
     S.D.footName.Color = S.Theme.Text
-    S.D.footName.Text = expandT > 0.05 and S.truncateB(S.displayName, nameAvail) or ""
+    S.D.footName.Text = expandT > 0.05 and S.truncateB(S.Cfg.streamer and "Hidden" or S.displayName, nameAvail) or ""
     S.D.footSub.Position = Vector2.new(x + 52, y + h - 30)
-    S.D.footSub.Text = expandT > 0.05 and S.truncate("@" .. S.playerName, nameAvail) or ""
+    S.D.footSub.Text = expandT > 0.05 and S.truncate(S.Cfg.streamer and "@hidden" or ("@" .. S.playerName), nameAvail) or ""
     S.D.gear.Visible = S.Win.visible and expandT > 0.6
     S.D.gear.Position = Vector2.new(x + sw - 30, y + h - 44)
     S.D.gear.Color = (S.activeTab == S.SETTINGS_TAB) and S.Theme.C1 or S.Theme.Dim
@@ -1954,6 +1980,14 @@ function S.relayoutRaw()
 
         for _, sec in ipairs(page.sections) do
             local sx, sy, swid = colX[sec.side] or cx, colY[sec.side] or startY, colW
+            -- custom width (fw = share of the content width). Wider than a column: the card spans both, starting below
+            -- whatever is already in either column; a right-column card shifts left so it stays inside the content
+            if sec.fw and page.custom then swid = math.floor(math.max(math.min(S.Const.CARD_MIN_W, cw), math.min(cw, sec.fw * cw))) end
+            local span = swid > colW + 1
+            if span then
+                sy = math.max(colY.left, colY.right)
+                sx = math.min(sx, cx + cw - swid)
+            end
             local tsy = sy
             sec.lay = { x = sx - cx, y = sy - startY, w = swid, h = sec.lay and sec.lay.h or 0 }
             -- the card being dragged floats under the mouse; its column spot (kept free above) is where it lands
@@ -2041,7 +2075,7 @@ function S.relayoutRaw()
             sec.rect = { x = sx, y = pTop, w = swid, h = math.max(0, pBot - pTop) }
             -- resize grip on the bottom-right corner (width and height)
             local gy = py + panelH - 12
-            local gripShown = S.LayoutEdit and S.Win.visible and gy >= visTop and gy + 10 <= visBot
+            local gripShown = S.LayoutEdit and S.activeTab ~= S.SETTINGS_TAB and S.Win.visible and gy >= visTop and gy + 10 <= visBot
             sec.grip.Visible = gripShown
             local gx = sx + swid - 12
             sec.gripRect = gripShown and { x = gx - 4, y = gy - 4, w = 18, h = 18 } or nil
@@ -2239,6 +2273,7 @@ function S.relayoutRaw()
                 colY[sec.side] = tsy + 56 + rowsSum * colTs
             end
             sec.lay.h = colY[sec.side] - tsy - 30
+            if span then colY[sec.side == "left" and "right" or "left"] = colY[sec.side] end -- both columns continue below it
         end
 
         -- scroll bookkeeping
@@ -2536,7 +2571,8 @@ function S.updateControls(dt, mx, my)
             local secHov = S.hoverOn() and not blockRows and sec.vis and sec.rect and S.inRect(mx, my, sec.rect.x, sec.rect.y, sec.rect.w, sec.rect.h) and mx > (S.Win.x + S.Sb.cur)
             sec.hovT = sec.hovT + ((secHov and 1 or 0) - sec.hovT) * aeF
             sec.panel.Color = S.lerpColor(S.Theme.Panel, S.Theme.PanelHov, sec.hovT)
-            local glowA = math.min(1, 0.16 + (0.10 * S.Cfg.cardGlow / 100) + 0.5 * sec.hovT + (S.LayoutEdit and 0.35 or 0)) * S.Cfg.opacity
+            local editing = S.LayoutEdit and S.activeTab ~= S.SETTINGS_TAB
+            local glowA = math.min(1, 0.16 + (0.10 * S.Cfg.cardGlow / 100) + 0.5 * sec.hovT + (editing and 0.35 or 0)) * S.Cfg.opacity
             sec.glow.Color = S.Theme.C1
             sec.glow.Transparency = glowA
             sec.glow.Visible = S.Win.visible and sec.vis and glowA > 0.03
@@ -3299,7 +3335,13 @@ function S.frame()
                 end
             end
         end
-        if S.In.pressed then S.Capture.row = nil end
+        -- a left click after the one that started listening binds MB1 (Esc cancels)
+        if S.Capture.row and S.In.pressed and os.clock() - (S.Capture.t or 0) > 0.05 then
+            S.Capture.row.vk = 0x01
+            if S.Capture.row.onChange then pcall(S.Capture.row.onChange, 0x01) end
+            if S.Capture.row.flag then S.markChanged() end
+            S.Capture.row = nil
+        end
         S.Win.dirty = true
     elseif S.Focus.row then
         local row = S.Focus.row
@@ -3362,14 +3404,13 @@ function S.frame()
     local overSidebar = S.inRect(S.In.x, S.In.y, x, y, math.max(S.Sb.cur, S.Const.SB_MIN), h) and S.Drag.mode == nil and not S.Drop.open and not S.Pick.open
     S.Sb.target = (overSidebar and not S.Cfg.collapseSidebar) and S.Sb.max or S.Const.SB_MIN
     local ease = S.animOn() and (1 - (0.0000001 ^ dt)) or 1
-    -- gentler ease for the sidebar so it glides open/closed instead of snapping
-    local sbEase = S.animOn() and (1 - (0.0006 ^ dt)) or 1
-    local newCur = S.Sb.cur + (S.Sb.target - S.Sb.cur) * sbEase
-    if math.abs(newCur - S.Sb.cur) > 0.1 then
-        S.Sb.cur = newCur
-        S.Win.dirty = true
-    elseif math.abs(S.Sb.target - S.Sb.cur) > 0.1 then
-        S.Sb.cur = S.Sb.target
+    -- sidebar open/close: a timed sine ease-out (0.26 s) that lands exactly on the target. Tried: cubic ease-out
+    -- (launches too hard), ease-in-out (slow start feels heavy). The old exponential ease jumped its last few px.
+    if S.Sb.target ~= S.Sb.to then S.Sb.from, S.Sb.to, S.Sb.t0 = S.Sb.cur, S.Sb.target, now end
+    if S.Sb.cur ~= S.Sb.to then
+        local p = S.animOn() and math.min(1, (now - S.Sb.t0) / 0.26) or 1
+        local e = math.sin(p * math.pi / 2)
+        S.Sb.cur = (p >= 1) and S.Sb.to or (S.Sb.from + (S.Sb.to - S.Sb.from) * e)
         S.Win.dirty = true
     end
 
@@ -3505,12 +3546,14 @@ function S.frame()
                         end
                     end
                 end
-                if page and S.LayoutEdit and not handled and S.In.y > y + S.TB then
+                -- the Settings page can't be rearranged
+                if page and S.LayoutEdit and S.activeTab ~= S.SETTINGS_TAB and not handled and S.In.y > y + S.TB then
                     -- editing: the grip resizes, anywhere else on a card (header or body) moves it; rows don't react
                     for _, sec in ipairs(page.sections) do
                         local gr, hr, r = sec.gripRect, sec.headRect, sec.rect
                         if gr and S.inRect(S.In.x, S.In.y, gr.x, gr.y, gr.w, gr.h) then
                             S.Drag.mode, S.Drag.sec = "cardsize", sec
+                            S.Drag.w0, S.Drag.x0 = sec.lay and sec.lay.w, S.In.x
                             handled = true
                             break
                         elseif (hr and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h)) or (r and sec.vis and S.inRect(S.In.x, S.In.y, r.x, r.y, r.w, r.h)) then
@@ -3527,7 +3570,7 @@ function S.frame()
                     -- click a section header -> collapse/expand that card
                     for _, sec in ipairs(page.sections) do
                         local hr = sec.headRect
-                        if not S.LayoutEdit and hr and S.In.y > y + S.TB and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h) then
+                        if not (S.LayoutEdit and S.activeTab ~= S.SETTINGS_TAB) and hr and S.In.y > y + S.TB and S.inRect(S.In.x, S.In.y, hr.x, hr.y, hr.w, hr.h) then
                             sec.collapsed = not sec.collapsed
                             S.markChanged()
                             handled = true
@@ -3583,7 +3626,7 @@ function S.frame()
                                     S.openPicker(row)
                                     S.Win.dirty = true
                                 elseif row.kind == "keybind" then
-                                    S.Capture.row = row
+                                    S.Capture.row, S.Capture.t = row, os.clock()
                                 elseif row.kind == "textbox" then
                                     S.Focus.row = row
                                 elseif row.kind == "divider" or row.kind == "note" then
@@ -3838,7 +3881,10 @@ function S.frame()
 end
 
 UI.Conn = S.RunService.RenderStepped:Connect(function()
+    local pf = _G.FallenPerf -- a host script's per-frame profiler, when it has one on
+    local t0 = pf and os.clock()
     local ok, e = pcall(S.frame)
+    if pf then pf.ui = pf.ui + (os.clock() - t0) end
     if not ok then
         S.errCount = S.errCount + 1
         if S.errCount <= 3 or S.errCount % 300 == 0 then
@@ -4019,6 +4065,8 @@ S.Library.Flags = S.FlagRows
 S.Library.Theme = S.Theme -- live: presets edit this table in place, so scripts can match the UI colours
 -- the Drawing font id the UI currently uses (follows the Font setting), so script text can match it
 function S.Library:GetFontId() return S.FontIds[S.Cfg.font] or 0 end
+-- Settings > Streamer mode: scripts should show "Player" (or similar) instead of real player names while it's on
+function S.Library:IsStreamer() return S.Cfg.streamer == true end
 
 function S.Library:CreateTab(name, icon)
     local idx = S.newTabIndex(name or "Tab", icon)
