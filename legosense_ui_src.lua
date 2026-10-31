@@ -962,6 +962,11 @@ function S.uiStateSnapshot(t)
             local l = {}
             for _, sec in ipairs(page.sections) do l[#l + 1] = { tostring(sec.title), sec.side, sec.fh or false, sec.fw or false } end
             lay[name] = l
+        elseif old[name] and idx ~= S.SETTINGS_TAB then
+            -- a saved layout is only applied when its tab is first drawn, so a tab not opened yet this session isn't
+            -- "custom" yet: keep its saved entry (dropping it here wiped every edited tab except the open one on the
+            -- first autosave). Reset removes the entry itself, so this never brings back a layout the user reset
+            lay[name] = old[name]
         end
     end
     for name, l in pairs(old) do if not present[name] then lay[name] = l end end -- tabs this script didn't make
