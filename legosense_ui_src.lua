@@ -2511,14 +2511,86 @@ function S.loadNyan()
 end
 
 -- Rainbow's full background only; the Nyan preset flyby keeps using the sharp shared frames.
+-- Keep the output small as well as the blur buffers: Drawing stretches the finished TGA.
+function S.nyanBlurSize(W, H)
+    local scale = math.max(6, W / 192, H / 192)
+    return math.max(1, math.floor(W / scale + 0.5)), math.max(1, math.floor(H / scale + 0.5))
+end
+function S.nyanBlurFrame(d, W, H, radius, alive)
+    if not alive() then return nil end
+    local w, h = S.nyanBlurSize(W, H)
+    local n, Y = w * h, S.budget
+    local ch = { buffer.create(n * 4), buffer.create(n * 4), buffer.create(n * 4), buffer.create(n * 4) }
+    -- Centre samples preserve the hard art pixels before blur; filtering a downsample first adds a minimum blur.
+    for y = 0, h - 1 do
+        local sy = math.min(d.h - 1, math.floor((y + 0.5) * d.h / h))
+        for x = 0, w - 1 do
+            local sx = math.min(d.w - 1, math.floor((x + 0.5) * d.w / w))
+            local v = buffer.readu32(d.px, (sy * d.w + sx) * 4)
+            local a, o = bit32.rshift(v, 24), (y * w + x) * 4
+            buffer.writef32(ch[1], o, bit32.band(v, 255) * a / 255)
+            buffer.writef32(ch[2], o, bit32.band(bit32.rshift(v, 8), 255) * a / 255)
+            buffer.writef32(ch[3], o, bit32.band(bit32.rshift(v, 16), 255) * a / 255)
+            buffer.writef32(ch[4], o, a)
+        end
+        if Y() and not alive() then return nil end
+    end
+    -- Match the theme blur's per-pass variance in display pixels. Simply scaling a fractional box radius
+    -- over-blurs small values on a coarse grid (its variance is linear, rather than quadratic, near zero).
+    local t = radius / 6 -- theme image: three box passes at half display resolution
+    local r, e = math.floor(t), t - math.floor(t)
+    local variance = 4 * (r * (r + 1) * (2 * r + 1) / 3 + 2 * e * (r + 1) ^ 2) / (2 * r + 1 + 2 * e)
+    local tmp = buffer.create(n * 4)
+    local function pass(buf, len, count, step, stride, scale)
+        local v = variance * scale * scale
+        local r = math.floor((math.sqrt(1 + 12 * v) - 1) / 2)
+        local edge = (2 * r + 1) * (v - r * (r + 1) / 3) / (2 * ((r + 1) ^ 2 - v))
+        local inv = 1 / (2 * r + 1 + 2 * edge)
+        for line = 0, count - 1 do
+            local base, sum = line * stride, 0
+            for k = -r, r do sum += buffer.readf32(buf, (base + math.clamp(k, 0, len - 1) * step) * 4) end
+            local left = buffer.readf32(buf, base * 4)
+            for i = 0, len - 1 do
+                local right = buffer.readf32(buf, (base + math.min(i + r + 1, len - 1) * step) * 4)
+                buffer.writef32(tmp, (base + i * step) * 4, (sum + edge * (left + right)) * inv)
+                local leaving = buffer.readf32(buf, (base + math.max(i - r, 0) * step) * 4)
+                sum, left = sum + right - leaving, leaving
+            end
+            if Y() and not alive() then return false end
+        end
+        buffer.copy(buf, 0, tmp, 0, n * 4)
+        return true
+    end
+    for c = 1, 4 do
+        for _ = 1, 3 do
+            if not pass(ch[c], w, h, 1, w, w / W) or not pass(ch[c], h, w, w, 1, h / H) then return nil end
+        end
+    end
+    local b = buffer.create(18 + n * 4)
+    buffer.writeu8(b, 2, 2) buffer.writeu16(b, 12, w) buffer.writeu16(b, 14, h)
+    buffer.writeu8(b, 16, 32) buffer.writeu8(b, 17, 0x28)
+    for i = 0, n - 1 do
+        local o, a = i * 4, buffer.readf32(ch[4], i * 4)
+        local k = a > 0.5 and 255 / a or 0
+        for c = 1, 3 do buffer.writeu8(b, 18 + o + c - 1, math.clamp(math.floor(buffer.readf32(ch[c], o) * k + 0.5), 0, 255)) end
+        buffer.writeu8(b, 18 + o + 3, math.clamp(math.floor(a + 0.5), 0, 255))
+        if i % 256 == 255 and Y() and not alive() then return nil end
+    end
+    return alive() and buffer.tostring(b) or nil
+end
 function S.blurNyan(W, H, blurPx)
     local frames = UI.nyanData
     local count = math.max(1, #S.Const.NYAN_FRAMES)
     local ready = frames ~= nil
     for i = 1, count do if not frames or not frames[i] then ready = false break end end
     local radius = blurPx * (S.K or 1)
-    local key = W and H and ready and radius > 0 and not S.Env.matcha and not S.Cfg.perfMode
+    local key = W and H and ready and radius > 0 and S.FX.ok and not S.Env.matcha and not S.Cfg.perfMode
         and table.concat({ blurPx, radius, W, H }, "|") or nil
+    -- One decoded set, independent of radius/size. Release it when the background is inactive.
+    if not W or not H or not S.FX.ok or S.Env.matcha or S.Cfg.perfMode then UI.nyanDecoded = nil end
+    if UI.nyanDecoded and UI.nyanDecoded.frames ~= frames then
+        UI.nyanDecoded, UI.nyanBlurKey = nil, nil
+    end
     if UI.nyanBlurKey == key then return end
     UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = key, nil, nil -- drop the previous set immediately
     UI.nyanApplied = nil -- keep cycling sharp frames until the entire replacement is ready
@@ -2532,17 +2604,25 @@ function S.blurNyan(W, H, blurPx)
     end
     task.delay(0.2, function()
         if not alive() then return end
+        local decoded = UI.nyanDecoded or { frames = frames }
+        UI.nyanDecoded = decoded
         local blurred = {}
         for i = 1, count do
-            local ok, data = pcall(S.blurImg, frames[i], W, H, radius, alive)
+            local ok, data = pcall(function()
+                local frame = frames[i]
+                local cached = decoded[i]
+                if not cached or cached.frame ~= frame then
+                    local d = (frame:sub(1, 3) == "GIF" and S.gifDecode or S.pngDecode)(frame, alive)
+                    if not d or not alive() then return nil end
+                    cached = { frame = frame, dec = d }
+                    decoded[i] = cached
+                end
+                return S.nyanBlurFrame(cached.dec, W, H, radius, alive)
+            end)
             if not alive() then return end
             if not ok or not data then
-                local frame = frames[i]
-                local format = frame:sub(2, 4) == "PNG" and ("PNG depth=" .. tostring(frame:byte(25))
-                    .. " type=" .. tostring(frame:byte(26)) .. " interlace=" .. tostring(frame:byte(29)))
-                    or (frame:sub(1, 3) == "GIF" and "GIF" or "non-PNG")
-                warn("Rainbow background blur: frame " .. i .. " could not be decoded/blurred (" .. format .. "); keeping sharp animation")
-                return -- no partial set, and no retry every layout for an unsupported frame
+                -- Silent: games upload client logs. Keep the sharp animation; no partial set or per-layout retry.
+                return
             end
             blurred[i] = data
             S.budget()
@@ -2554,8 +2634,8 @@ function S.blurNyan(W, H, blurPx)
 end
 
 -- ========== Nyan preset FX ==========
--- Kept outside S.D so showing the window never flashes the idle flyby. S.New owns unload cleanup.
-S.Nyan = { stars = {}, trail = {}, clock = 0, wait = 20 + math.random() * 10, hidden = true }
+-- Kept outside S.D so showing the window never flashes stale FX. S.New owns unload cleanup.
+S.Nyan = { stars = {}, trail = {}, clock = 0, hidden = true }
 function S.hideNyan()
     local F = S.Nyan
     if F.hidden then return end
@@ -2585,33 +2665,33 @@ function S.updateNyan(dt)
         F.cat = S.New("Image", { Transparency = 0, ZIndex = 32, Visible = false })
     end
     F.hidden = false
-    F.clock = F.clock + dt -- visible time only: closing the window pauses the wait and the current pass
+    F.clock = F.clock + dt -- visible time only: closing the window pauses the loop and twinkle
     local K, opacity = S.K or 1, S.Cfg.opacity or 1
     local x, y, w, h = S.Win.x, S.Win.y, S.Win.w, S.Win.h
-    for _, star in ipairs(F.stars) do
+    for i, star in ipairs(F.stars) do
         local pulse = (math.sin(F.clock * 1.15 + star.phase) + 1) * 0.5
-        local size = (pulse > 0.85 and 3 or 2) / K
+        local size = ((i % 3 == 0 and 4 or 3) + (pulse > 0.85 and 1 or 0)) / K
         star.o.Position = Vector2.new(math.floor((x + 12 + star.x * (w - 24)) * K) / K,
             math.floor((y + S.TB + 12 + star.y * (h - S.TB - 24)) * K) / K)
         star.o.Size = Vector2.new(size, size)
-        star.o.Transparency = (0.12 + pulse * 0.38) * opacity
+        star.o.Transparency = (0.20 + pulse * 0.50) * opacity
         star.o.Visible = true -- Z30: above the background, below all card surfaces and text
     end
     local art = S.Cfg.themeImg ~= false and S.Cfg.themeImgUrl == ""
-    if F.art ~= art then
-        F.art = art
-        F.wait = F.clock + 20 + math.random() * 10
-    end
     if art then S.loadNyan() end -- shares Rainbow's cached PNGs; no buffer/Instance dependency on Matcha
     if not art or not UI.nyanData0 then
         F.pass = nil
-    elseif not F.pass and F.clock >= F.wait then
+    elseif not F.pass then
         F.pass = F.clock
-        F.wait = F.clock + 20 + math.random() * 10
     end
-    local elapsed = F.pass and F.clock - F.pass
-    if elapsed and elapsed >= 4 then F.pass, elapsed = nil, nil end
-    if not elapsed then
+    local duration = 5
+    local elapsed = F.pass and (F.clock - F.pass) % duration
+    -- The cached 530x210 PNGs contain 10x source pixels: snap their 53x21 art grid to whole device pixels.
+    local pixel = math.max(1, math.floor((S.TB - 8) * K / 21))
+    local catW, catH = 53 * pixel / K, 21 * pixel / K
+    local left = math.ceil((F.left or x) * K) / K
+    local right = math.floor((F.right or x) * K) / K
+    if not elapsed or right - left < catW then
         if F.flyShown then
             F.cat.Visible = false
             for _, band in ipairs(F.trail) do band.Visible = false end
@@ -2619,13 +2699,7 @@ function S.updateNyan(dt)
         end
         return
     end
-    -- The cached 530x210 PNGs contain 10x source pixels: snap their 53x21 art grid to whole device pixels.
-    -- Fit the top bar first (smaller than one third of the large background); no image resampling per frame.
-    local pixel = math.max(1, math.floor((S.TB - 8) * K / 21))
-    local catW, catH = 53 * pixel / K, 21 * pixel / K
-    local left = math.ceil((x + S.Sb.cur + 8) * K) / K
-    local right = math.floor((x + w - 8) * K) / K
-    local catX = math.floor((left + (right - left + catW) * elapsed / 4) * K) / K
+    local catX = math.floor((left + (right - left - catW) * elapsed / duration) * K) / K
     local catY = math.floor((y + (S.TB - catH) / 2) * K) / K
     F.cat.Size = Vector2.new(catW, catH)
     F.cat.Position = Vector2.new(catX, catY) -- geometry before Data, also required by Matcha
@@ -2639,9 +2713,10 @@ function S.updateNyan(dt)
         F.data = data
     end
     local alpha = opacity * (S.Cfg.themeImgA or 100) / 100
-    -- There is no Drawing scissor: fade the whole image at the edge, then hide it before it can spill.
-    F.cat.Transparency = alpha * math.clamp((right - catX - catW) / catW, 0, 1)
-    F.cat.Visible = catX + catW <= right
+    -- There is no Drawing scissor: keep the whole image inside the free stretch and fade both loop edges.
+    local fade = math.clamp(math.min(elapsed, duration - elapsed) / 0.3, 0, 1)
+    F.cat.Transparency = alpha * fade
+    F.cat.Visible = fade > 0
     for segment = 1, 3 do
         local a = math.max(left, catX - segment * 12 * pixel / K)
         local b = math.min(right, catX - (segment - 1) * 12 * pixel / K)
@@ -2650,8 +2725,8 @@ function S.updateNyan(dt)
             local o = F.trail[(segment - 1) * 6 + band]
             o.Position = Vector2.new(a, catY + step + (band - 1) * 3 * pixel / K)
             o.Size = Vector2.new(math.max(0, b - a), 3 * pixel / K)
-            o.Transparency = alpha * (1 - segment / 4) * math.clamp((4 - elapsed) * 2, 0, 1)
-            o.Visible = b > a -- Z32 keeps the title, search text and buttons at Z33 above the flyby
+            o.Transparency = alpha * (1 - segment / 4) * fade
+            o.Visible = b > a and fade > 0 -- title and controls sit outside these bounds
         end
     end
     F.flyShown = true
@@ -4472,6 +4547,7 @@ function S.setPerfMode(on)
         for _, panel in pairs(S.GlassP) do panel.want = nil end
         UI.nyanData, UI.nyanData0, UI.nyanApplied = nil, nil, nil
         UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = nil, nil, nil
+        UI.nyanDecoded = nil
         S.hideNyan()
         S.hideSnow()
         S.updateRipples()
@@ -4706,9 +4782,9 @@ S.Presets = {
         Dark = S.C3(30, 24, 40), Bg = S.C3(34, 35, 38), Panel = S.C3(43, 44, 48), PanelHov = S.C3(52, 53, 58),
         Control = S.C3(54, 55, 60), Track = S.C3(78, 80, 86), Header = S.C3(190, 193, 200) },
     Nyan = { c1 = S.C3(255, 130, 190), c2 = S.C3(130, 195, 255),
-        Dark = S.C3(11, 27, 58), Bg = S.C3(11, 31, 69), Panel = S.C3(14, 42, 92), PanelHov = S.C3(20, 52, 108),
-        Control = S.C3(20, 48, 96), Track = S.C3(38, 68, 115), Header = S.C3(200, 219, 255),
-        Text = S.C3(242, 246, 255), Dim = S.C3(163, 187, 222) },
+        Dark = S.C3(14, 14, 14), Bg = S.C3(26, 26, 26), Panel = S.C3(39, 39, 39), PanelHov = S.C3(49, 49, 49),
+        Control = S.C3(55, 55, 55), Track = S.C3(78, 78, 78), Header = S.C3(205, 205, 205),
+        Text = S.C3(255, 255, 255), Dim = S.C3(180, 180, 180) },
     Custom = nil,
 }
 
@@ -5260,6 +5336,11 @@ function S.relayoutRaw()
     S.D.layReset.Position = Vector2.new(pX - 44, y + 12)
     S.ResetRect = S.LayoutEdit and { x = pX - 48, y = y + 6, w = 42, h = 22 } or nil
     S.D.title.Text = S.truncateB(titleName, w - lw - 16 - 50 - searchW - (S.LayoutEdit and 70 or 26))
+    if S.Cfg.preset == "Nyan" and not S.Cfg.perfMode then
+        -- Measure after title truncation; reserve the first control's entire hit area, including Reset while editing.
+        S.Nyan.left = S.D.title.Position.X + S.TW(S.D.title, S.CHAR_WB) + 12
+        S.Nyan.right = (S.ResetRect or S.PencilRect).x - 8
+    end
     S.D.close.Position = Vector2.new(x + w - 20, y + 9)
     do
         -- quarter arc in the bottom-right corner, 5 px in from the window edges
@@ -8841,8 +8922,6 @@ function S.frame()
         S.Win.dirty = true
     end
 
-    S.updateNyan(frameDelta)
-
     -- nyan background frame animation (swaps Data + touches Position so Matcha re-decodes)
     if S.D.nyan.Visible and not S.Cfg.perfMode and #S.Const.NYAN_FRAMES > 1 and UI.nyanData and UI.nyanRect then
         S.nyanClock = S.nyanClock + dt
@@ -9455,6 +9534,7 @@ function S.frame()
         end
         S.Search.focus = nil
     end
+    S.updateNyan(frameDelta) -- use this frame's title/control bounds after any relayout
     S.perfSection("updateControls")
     S.updateControls(dt, S.In.x, S.In.y)
     S.perfSection("clipRows")
@@ -9549,6 +9629,7 @@ function UI.Unload()
     if S.Perf.started then pcall(S.perfSend, "unload") end -- before S.unloaded / disconnects
     S.unloaded = true -- every Drawing write of this instance becomes a no-op (see S.scaleDrawing)
     UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = nil, nil, nil
+    UI.nyanDecoded = nil
     for _, fn in ipairs(S.onUnloadList) do pcall(fn) end -- let the consumer script stop its loops/ESP too
     if UI.Conn then pcall(function() UI.Conn:Disconnect() end) end
     if not S.Env.matcha then pcall(function() S.RunService:UnbindFromRenderStep("LSBlur") end) end
@@ -10279,7 +10360,10 @@ function S.Library:CreateHome(opts)
     return tab
 end
 
-function S.Library:SetPreset(name) S.applyPreset(name) S.Win.dirty = true end
+function S.Library:SetPreset(name)
+    if S.Presets[name] or name == "Custom" then self:SetFlag("preset", name) end
+    S.Win.dirty = true
+end
 function S.Library:GetFlag(flag)
     local r = S.FlagRows[flag]
     if not r then return nil end
