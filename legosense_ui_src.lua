@@ -984,8 +984,7 @@ function S.cascSwitch()
 end
 S.Const.ALPHA_CTRL = 0.6
 S.Const.IMG_RATIO = 0.5625
--- nyan-cat background for the Rainbow theme. paste split-frame PNG urls (ezgif.com/split) into
--- Const.NYAN_FRAMES to animate; with a single url it shows a static image. cached to disk per frame.
+-- Sharp frames for the Rainbow top-bar flyby, cached to disk per frame.
 S.Const.NYAN_URL = "https://api.alo.ne/file/f5g8xf"   -- source gif (fallback single frame)
 S.Const.NYAN_FRAMES = {
     "https://api.alo.ne/file/30ulqs", "https://api.alo.ne/file/h9jgyj",
@@ -1040,6 +1039,7 @@ S.KeyRows = {}       -- keybind rows with a Mode (polled every frame by S.pollKe
 S.onUnloadList = {}  -- Library:OnUnload handlers
 S.Sb  = { cur = S.Const.SB_MIN, target = S.Const.SB_MIN, max = 220 }
 S.hue = 0.28
+S.Accent = { C1 = S.BaseC1, C2 = S.BaseC2 }
 
 -- no built-in feature tabs: everything except the always-present Settings page comes from
 -- the public API (Library:CreateTab). Settings starts at index 1 and shifts up as tabs are added.
@@ -2080,7 +2080,6 @@ S.D = {}
 S.D.winGlow = S.FX.newGlow(28) -- its image is replaced by the window-shaped halo (S.updateWinGlow)
 S.D.main    = S.New("Square", { Filled = true, Color = S.Theme.Bg, Transparency = S.Const.ALPHA_BG, ZIndex = 29, Corner = 8, Visible = true })
 S.D.themeImg   = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = false, Size = Vector2.new(300, 300) })
-S.D.nyan    = S.New("Image",  { Transparency = 1, ZIndex = 30, Visible = false })
 S.D.topbar  = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 31, Corner = 8, Visible = true })
 S.D.sidebar = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 32, Corner = 8, Visible = true })
 S.D.seam    = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = S.Const.ALPHA_BAR, ZIndex = 33, Corner = 0, Visible = true })
@@ -2503,137 +2502,13 @@ function S.loadNyan()
             if data and UI.nyanData == frames and not S.unloaded then
                 frames[i] = data
                 if not UI.nyanData0 then UI.nyanData0 = data end
-                if i == 1 then UI.nyanRatio = imgRatio(data) or 1 end
                 S.Win.dirty = true
             end
         end)
     end
 end
 
--- Rainbow's full background only; the Nyan preset flyby keeps using the sharp shared frames.
--- Keep the output small as well as the blur buffers: Drawing stretches the finished TGA.
-function S.nyanBlurSize(W, H)
-    local scale = math.max(6, W / 192, H / 192)
-    return math.max(1, math.floor(W / scale + 0.5)), math.max(1, math.floor(H / scale + 0.5))
-end
-function S.nyanBlurFrame(d, W, H, radius, alive)
-    if not alive() then return nil end
-    local w, h = S.nyanBlurSize(W, H)
-    local n, Y = w * h, S.budget
-    local ch = { buffer.create(n * 4), buffer.create(n * 4), buffer.create(n * 4), buffer.create(n * 4) }
-    -- Centre samples preserve the hard art pixels before blur; filtering a downsample first adds a minimum blur.
-    for y = 0, h - 1 do
-        local sy = math.min(d.h - 1, math.floor((y + 0.5) * d.h / h))
-        for x = 0, w - 1 do
-            local sx = math.min(d.w - 1, math.floor((x + 0.5) * d.w / w))
-            local v = buffer.readu32(d.px, (sy * d.w + sx) * 4)
-            local a, o = bit32.rshift(v, 24), (y * w + x) * 4
-            buffer.writef32(ch[1], o, bit32.band(v, 255) * a / 255)
-            buffer.writef32(ch[2], o, bit32.band(bit32.rshift(v, 8), 255) * a / 255)
-            buffer.writef32(ch[3], o, bit32.band(bit32.rshift(v, 16), 255) * a / 255)
-            buffer.writef32(ch[4], o, a)
-        end
-        if Y() and not alive() then return nil end
-    end
-    -- Match the theme blur's per-pass variance in display pixels. Simply scaling a fractional box radius
-    -- over-blurs small values on a coarse grid (its variance is linear, rather than quadratic, near zero).
-    local t = radius / 6 -- theme image: three box passes at half display resolution
-    local r, e = math.floor(t), t - math.floor(t)
-    local variance = 4 * (r * (r + 1) * (2 * r + 1) / 3 + 2 * e * (r + 1) ^ 2) / (2 * r + 1 + 2 * e)
-    local tmp = buffer.create(n * 4)
-    local function pass(buf, len, count, step, stride, scale)
-        local v = variance * scale * scale
-        local r = math.floor((math.sqrt(1 + 12 * v) - 1) / 2)
-        local edge = (2 * r + 1) * (v - r * (r + 1) / 3) / (2 * ((r + 1) ^ 2 - v))
-        local inv = 1 / (2 * r + 1 + 2 * edge)
-        for line = 0, count - 1 do
-            local base, sum = line * stride, 0
-            for k = -r, r do sum += buffer.readf32(buf, (base + math.clamp(k, 0, len - 1) * step) * 4) end
-            local left = buffer.readf32(buf, base * 4)
-            for i = 0, len - 1 do
-                local right = buffer.readf32(buf, (base + math.min(i + r + 1, len - 1) * step) * 4)
-                buffer.writef32(tmp, (base + i * step) * 4, (sum + edge * (left + right)) * inv)
-                local leaving = buffer.readf32(buf, (base + math.max(i - r, 0) * step) * 4)
-                sum, left = sum + right - leaving, leaving
-            end
-            if Y() and not alive() then return false end
-        end
-        buffer.copy(buf, 0, tmp, 0, n * 4)
-        return true
-    end
-    for c = 1, 4 do
-        for _ = 1, 3 do
-            if not pass(ch[c], w, h, 1, w, w / W) or not pass(ch[c], h, w, w, 1, h / H) then return nil end
-        end
-    end
-    local b = buffer.create(18 + n * 4)
-    buffer.writeu8(b, 2, 2) buffer.writeu16(b, 12, w) buffer.writeu16(b, 14, h)
-    buffer.writeu8(b, 16, 32) buffer.writeu8(b, 17, 0x28)
-    for i = 0, n - 1 do
-        local o, a = i * 4, buffer.readf32(ch[4], i * 4)
-        local k = a > 0.5 and 255 / a or 0
-        for c = 1, 3 do buffer.writeu8(b, 18 + o + c - 1, math.clamp(math.floor(buffer.readf32(ch[c], o) * k + 0.5), 0, 255)) end
-        buffer.writeu8(b, 18 + o + 3, math.clamp(math.floor(a + 0.5), 0, 255))
-        if i % 256 == 255 and Y() and not alive() then return nil end
-    end
-    return alive() and buffer.tostring(b) or nil
-end
-function S.blurNyan(W, H, blurPx)
-    local frames = UI.nyanData
-    local count = math.max(1, #S.Const.NYAN_FRAMES)
-    local ready = frames ~= nil
-    for i = 1, count do if not frames or not frames[i] then ready = false break end end
-    local radius = blurPx * (S.K or 1)
-    local key = W and H and ready and radius > 0 and S.FX.ok and not S.Env.matcha and not S.Cfg.perfMode
-        and table.concat({ blurPx, radius, W, H }, "|") or nil
-    -- One decoded set, independent of radius/size. Release it when the background is inactive.
-    if not W or not H or not S.FX.ok or S.Env.matcha or S.Cfg.perfMode then UI.nyanDecoded = nil end
-    if UI.nyanDecoded and UI.nyanDecoded.frames ~= frames then
-        UI.nyanDecoded, UI.nyanBlurKey = nil, nil
-    end
-    if UI.nyanBlurKey == key then return end
-    UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = key, nil, nil -- drop the previous set immediately
-    UI.nyanApplied = nil -- keep cycling sharp frames until the entire replacement is ready
-    if not key then return end
-    local job = {}
-    UI.nyanBlurJob = job
-    local function alive()
-        return UI.nyanBlurJob == job and UI.nyanBlurKey == key and UI.nyanData == frames
-            and S.Cfg.themeImgBlur == blurPx and blurPx * (S.K or 1) == radius
-            and not S.Cfg.perfMode and not S.Env.matcha and not S.unloaded
-    end
-    task.delay(0.2, function()
-        if not alive() then return end
-        local decoded = UI.nyanDecoded or { frames = frames }
-        UI.nyanDecoded = decoded
-        local blurred = {}
-        for i = 1, count do
-            local ok, data = pcall(function()
-                local frame = frames[i]
-                local cached = decoded[i]
-                if not cached or cached.frame ~= frame then
-                    local d = (frame:sub(1, 3) == "GIF" and S.gifDecode or S.pngDecode)(frame, alive)
-                    if not d or not alive() then return nil end
-                    cached = { frame = frame, dec = d }
-                    decoded[i] = cached
-                end
-                return S.nyanBlurFrame(cached.dec, W, H, radius, alive)
-            end)
-            if not alive() then return end
-            if not ok or not data then
-                -- Silent: games upload client logs. Keep the sharp animation; no partial set or per-layout retry.
-                return
-            end
-            blurred[i] = data
-            S.budget()
-            if not alive() then return end
-        end
-        UI.nyanBlurFrames, UI.nyanBlurJob, UI.nyanApplied = blurred, nil, nil
-        S.Win.dirty = true
-    end)
-end
-
--- ========== Nyan preset FX ==========
+-- ========== Rainbow preset FX ==========
 -- Kept outside S.D so showing the window never flashes stale FX. S.New owns unload cleanup.
 S.Nyan = { stars = {}, trail = {}, clock = 0, hidden = true }
 function S.hideNyan()
@@ -2646,7 +2521,7 @@ function S.hideNyan()
 end
 function S.updateNyan(dt)
     local F = S.Nyan
-    if not S.Win.visible or S.Cfg.perfMode or S.Cfg.preset ~= "Nyan" or not S.Env.drawing or S.unloaded then
+    if not S.Win.visible or S.Cfg.perfMode or S.Cfg.preset ~= "Rainbow" or not S.Env.drawing or S.unloaded then
         S.hideNyan()
         return
     end
@@ -2678,7 +2553,7 @@ function S.updateNyan(dt)
         star.o.Visible = true -- Z30: above the background, below all card surfaces and text
     end
     local art = S.Cfg.themeImg ~= false and S.Cfg.themeImgUrl == ""
-    if art then S.loadNyan() end -- shares Rainbow's cached PNGs; no buffer/Instance dependency on Matcha
+    if art then S.loadNyan() end -- no buffer/Instance dependency on Matcha
     if not art or not UI.nyanData0 then
         F.pass = nil
     elseif not F.pass then
@@ -3102,6 +2977,11 @@ function S.addSection(tabIdx, title, side)
         bar = S.Scroll.new(35), scroll = 0, scrollCur = 0, scrollV = 0,
         ci = #S.Pages[tabIdx].allSections + 1, side0 = side, page = S.Pages[tabIdx],
     }
+    -- Length prefixes and occurrence counts keep duplicate titles unambiguous.
+    local tabName, name, tabN, secN = tostring(S.tabNameOf(tabIdx)), tostring(title), 0, 1
+    for i = 1, tabIdx do if tostring(S.tabNameOf(i)) == tabName then tabN += 1 end end
+    for _, other in ipairs(S.Pages[tabIdx].allSections) do if tostring(other.title) == name then secN += 1 end end
+    sec.favPath = #tabName .. ":" .. tabName .. ":" .. tabN .. ":" .. #name .. ":" .. name .. ":" .. secN
     sec.sbT = sec.bar.thumb
     table.insert(S.Pages[tabIdx].allSections, sec)
     table.insert(S.Pages[tabIdx].sections, sec)
@@ -3206,8 +3086,12 @@ function S.addSlider(sec, label, min, max, default, suffix, flag, onChange)
 end
 
 function S.addButton(sec, label, onClick)
+    sec.favCounts = sec.favCounts or {}
+    local name = tostring(label)
+    sec.favCounts[name] = (sec.favCounts[name] or 0) + 1
     local row = {
         kind = "button", label = label, onClick = onClick, hovT = 0, vis = true, h = 32,
+        favKey = "@button:" .. sec.favPath .. ":" .. #name .. ":" .. name .. ":" .. sec.favCounts[name],
         box = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = S.Const.ALPHA_CTRL, ZIndex = 33, Corner = 4, Visible = false }),
         oline = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 34, Corner = 4, Visible = false }),
         lbl = S.New("Text", { Text = label, Color = S.Theme.Text, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS, Visible = false }),
@@ -3661,8 +3545,9 @@ function S.addKeybind(sec, label, defaultVk, flag, onChange)
     local row = {
         kind = "keybind", label = label, vk = defaultVk, onChange = onChange, hovT = 0, vis = true, h = 34,
         lbl  = S.New("Text", { Text = label, Color = S.Theme.Text, Transparency = 1, ZIndex = 33, Font = 0, Size = S.FS, Visible = false }),
-        chip = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = 1, ZIndex = 33, Corner = 3, Visible = false, Size = Vector2.new(44, 17) }),
-        chipT= S.New("Text", { Text = S.keyName(defaultVk), Color = S.Theme.Dim, Transparency = 1, ZIndex = 34, Font = 0, Size = S.FS - 1, Visible = false }),
+        chip = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = S.Const.ALPHA_CTRL, ZIndex = 33, Corner = 4, Visible = false, Size = Vector2.new(34, 17) }),
+        oline = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 34, Corner = 4, Visible = false, Size = Vector2.new(34, 17) }),
+        chipT= S.New("Text", { Text = S.keyName(defaultVk), Color = S.Theme.Text, Transparency = 1, ZIndex = 35, Font = 0, Size = S.FS - 1, Visible = false }),
     }
     table.insert(sec.rows, row)
     table.insert(S.KeybindRows, row)
@@ -3964,6 +3849,7 @@ function S.updateToasts(dt)
             o.Visible = a > 0.01
         end
         S.glassPanel(t, t.bg, x, y, w, hh, a, 6)
+        t.bg.Transparency = a * 0.95 -- toasts sit over bright game art: keep the solid fill under the glass so the text stays readable
         if glows and S.FX.ok and not t.glow then t.glow = S.FX.newGlow(59) end
         if t.glow then
             if glows then
@@ -4438,7 +4324,7 @@ function S.snapshot(scope)
     end
     if ui then
         local th = {}
-        for _, k in ipairs(S.THEME_KEYS) do local c = S.Theme[k] th[k] = { c.R, c.G, c.B } end
+        for _, k in ipairs(S.THEME_KEYS) do local c = S.Accent[k] or S.Theme[k] th[k] = { c.R, c.G, c.B } end
         t.theme = th
         -- built-in overlays (keybinds, watermark) belong to the look, not to one script: their spots live here
         local ov = {}
@@ -4452,6 +4338,7 @@ function S.snapshot(scope)
 end
 
 function S.applyRow(row, v)
+    if row.flag == "preset" and v == "Nyan" then v = "Rainbow" end
     if row.kind == "progress" and type(v) == "number" then
         row.value = v
     elseif row.kind == "toggle" and type(v) == "boolean" then
@@ -4482,7 +4369,7 @@ end
 
 -- flags applied in a fixed order: "preset" first (it retints the theme and overwrites the
 -- colour swatches), then the colours (so a saved Custom colour wins), then everything else.
-S.LOAD_ORDER = { preset = 1, color1 = 2, color2 = 2 }
+S.LOAD_ORDER = { preset = 1, color1 = 2, color2 = 2, rainbow = 3 }
 -- scope nil = everything (old single-file settings), "script" = only the script's flags (configs never change the
 -- look), "ui" = only UI flags + theme + window geometry
 function S.loadSnapshot(txt, scope)
@@ -4494,6 +4381,18 @@ function S.loadSnapshot(txt, scope)
             local isUI = S.UIFlags[flag] == true or flag == "theme" or flag == "w" or flag == "h" or flag == "x" or flag == "y" or flag == "_uiOverlays"
             if isUI ~= keepUI then data[flag] = nil end
         end
+    end
+    local legacyRainbow = data.preset == "Rainbow" and data.rainbow == nil
+    if data.preset == "Nyan" then data.preset = "Rainbow" end
+    if legacyRainbow then
+        -- Old Rainbow saved light surfaces and animated bars; start with the space palette.
+        data.theme = nil
+        for _, flag in ipairs({ "color1", "color2", "bgColor", "textColor", "dimColor", "headerColor", "panelColor", "barColor", "controlColor" }) do
+            data[flag] = nil
+        end
+    elseif data.preset == "Rainbow" and data.rainbow == nil and type(data.theme) == "table" then
+        -- Older snapshots saved the moving accent too; the swatches hold its static colours.
+        data.theme.C1, data.theme.C2 = data.color1, data.color2
     end
     -- A removed preset becomes a personal palette when one was saved; otherwise use the default.
     if data.preset ~= nil and data.preset ~= "Custom" and not S.Presets[data.preset] then
@@ -4525,7 +4424,10 @@ function S.loadSnapshot(txt, scope)
     if type(data.theme) == "table" then
         for _, k in ipairs(S.THEME_KEYS) do
             local c = S.arr2c(data.theme[k])
-            if c then S.Theme[k] = c end
+            if c then
+                S.Theme[k] = c
+                if k == "C1" or k == "C2" then S.Accent[k] = c end
+            end
         end
     end
     S.Win.dirty = true
@@ -4545,9 +4447,7 @@ function S.setPerfMode(on)
         S.Sb.holdUntil = nil
         S.Glass.want, UI.themeBlurJob = nil, nil
         for _, panel in pairs(S.GlassP) do panel.want = nil end
-        UI.nyanData, UI.nyanData0, UI.nyanApplied = nil, nil, nil
-        UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = nil, nil, nil
-        UI.nyanDecoded = nil
+        UI.nyanData, UI.nyanData0 = nil, nil
         S.hideNyan()
         S.hideSnow()
         S.updateRipples()
@@ -4777,11 +4677,7 @@ S.Presets = {
         Dark = S.C3(30, 20, 32), Bg = S.C3(78, 46, 82), Panel = S.C3(96, 62, 98), PanelHov = S.C3(106, 73, 107),
         Control = S.C3(60, 38, 62), Track = S.C3(87, 68, 89), Header = S.C3(255, 160, 215),
         Text = S.C3(255, 228, 246), Dim = S.C3(214, 170, 210) },
-    -- Rainbow uses Mono's light surfaces; the frame loop cycles the accent + sidebar/topbar hue
-    Rainbow = { c1 = S.C3(228, 230, 234), c2 = S.C3(176, 180, 188),
-        Dark = S.C3(30, 24, 40), Bg = S.C3(34, 35, 38), Panel = S.C3(43, 44, 48), PanelHov = S.C3(52, 53, 58),
-        Control = S.C3(54, 55, 60), Track = S.C3(78, 80, 86), Header = S.C3(190, 193, 200) },
-    Nyan = { c1 = S.C3(255, 130, 190), c2 = S.C3(130, 195, 255),
+    Rainbow = { c1 = S.C3(255, 130, 190), c2 = S.C3(130, 195, 255),
         Dark = S.C3(14, 14, 14), Bg = S.C3(26, 26, 26), Panel = S.C3(39, 39, 39), PanelHov = S.C3(49, 49, 49),
         Control = S.C3(55, 55, 55), Track = S.C3(78, 78, 78), Header = S.C3(205, 205, 205),
         Text = S.C3(255, 255, 255), Dim = S.C3(180, 180, 180) },
@@ -4860,8 +4756,7 @@ end
 function S.applyPreset(name)
     local p = S.Presets[name]
     if not p then return end
-    S.Theme.C1 = p.c1
-    S.Theme.C2 = p.c2
+    S.applyAccent(p.c1, p.c2)
     S.Theme.Dark = p.Dark
     S.Theme.Bg = p.Bg
     S.Theme.Panel = p.Panel
@@ -4877,9 +4772,17 @@ end
 S.Const.TEXT_DEFAULT, S.Const.DIM_DEFAULT = S.C3(219, 225, 211), S.C3(130, 137, 118)
 
 function S.applyAccent(c1, c2)
+    S.Accent.C1, S.Accent.C2 = c1, c2
     S.Theme.C1 = c1
     S.Theme.C2 = c2
     S.Win.dirty = true
+end
+function S.setRainbow(on)
+    S.Cfg.rainbow = on
+    if S.FlagRows.rainbow then S.FlagRows.rainbow.value = on end
+    if not on then S.Theme.C1, S.Theme.C2 = S.Accent.C1, S.Accent.C2 end
+    S.Win.dirty = true
+    S.markChanged()
 end
 
 do
@@ -4905,8 +4808,9 @@ do
     -- ===== Theme =====
     local sTheme = S.addSection(S.SETTINGS_TAB, "COLOURS", "left")
     sTheme.psub = "Theme"
-    S.addDropdown(sTheme, "Preset", { "Matcha", "Midnight", "Ember", "Mono", "Blossom", "Rose", "Violet", "Gold", "Crimson", "Aqua", "Rainbow", "Nyan", "Custom" }, "Mono", "preset", function(v)
+    S.addDropdown(sTheme, "Preset", { "Matcha", "Midnight", "Ember", "Mono", "Blossom", "Rose", "Violet", "Gold", "Crimson", "Aqua", "Rainbow", "Custom" }, "Mono", "preset", function(v)
         S.Cfg.preset = v
+        if v == "Rainbow" then S.setRainbow(true) end
         local p = S.Presets[v]
         if p then
             S.applyPreset(v)
@@ -4924,25 +4828,36 @@ do
     S.rColor1 = S.addColor(sTheme, "Color 1", S.BaseC1, "color1", function(c)
         -- only a real change makes it Custom: the saved colour re-applies on load and flipped every themed preset to
         -- Custom (theme image then never loaded on start)
-        if S.hexOf(c) ~= S.hexOf(S.Theme.C1) then S.Cfg.preset = "Custom" end
-        S.Theme.C1 = c S.Win.dirty = true S.markChanged()
+        if S.hexOf(c) ~= S.hexOf(S.Accent.C1) then
+            S.Cfg.preset = "Custom"
+            if S.FlagRows.preset then S.FlagRows.preset.value = "Custom" end
+        end
+        S.Accent.C1 = c
+        if not S.Cfg.rainbow then S.Theme.C1 = c end
+        S.Win.dirty = true S.markChanged()
     end)
     S.rColor2 = S.addColor(sTheme, "Color 2", S.BaseC2, "color2", function(c)
         -- only a real change makes it Custom: the saved colour re-applies on load and flipped every themed preset to
         -- Custom (theme image then never loaded on start)
-        if S.hexOf(c) ~= S.hexOf(S.Theme.C2) then S.Cfg.preset = "Custom" end
-        S.Theme.C2 = c S.Win.dirty = true S.markChanged()
+        if S.hexOf(c) ~= S.hexOf(S.Accent.C2) then
+            S.Cfg.preset = "Custom"
+            if S.FlagRows.preset then S.FlagRows.preset.value = "Custom" end
+        end
+        S.Accent.C2 = c
+        if not S.Cfg.rainbow then S.Theme.C2 = c end
+        S.Win.dirty = true S.markChanged()
     end)
-    local rSpeed = S.addSlider(sTheme, "Rainbow speed", 10, 300, 100, " %", "rainbowSpeed", function(v) S.Cfg.rainbowSpeed = v S.markChanged() end)
-    rSpeed.visFn = function() return S.Cfg.preset == "Rainbow" or S.Cfg.preset == "Nyan" end
-    rSpeed.showT = rSpeed.visFn() and 1 or 0
-    S.rBg = S.addColor(sTheme, "Background", S.Theme.Bg, "bgColor", function(c) S.Theme.Bg = c S.Win.dirty = true S.markChanged() end)
+    S.rBg =S.addColor(sTheme, "Background", S.Theme.Bg, "bgColor", function(c) S.Theme.Bg = c S.Win.dirty = true S.markChanged() end)
     -- in SwatchRows so a preset change refreshes it (else its stale value was saved and put the old text colour back on load)
     S.SwatchRows = S.SwatchRows or {}
     S.SwatchRows.Text = S.addColor(sTheme, "Text color", S.Theme.Text, "textColor", function(c) S.Theme.Text = c S.Win.dirty = true S.markChanged() end)
 
     sw(sTheme, "Description text", "Dim", "dimColor", "Greyed-out text: descriptions, values, hints")
     sw(sTheme, "Card titles", "Header", "headerColor")
+    S.addToggle(sTheme, "Rainbow", S.Cfg.rainbow, "rainbow", S.setRainbow).tip = "Cycle accent and glow colours on any preset"
+    local rSpeed = S.addSlider(sTheme, "Rainbow speed", 10, 300, 100, " %", "rainbowSpeed", function(v) S.Cfg.rainbowSpeed = v S.markChanged() end)
+    rSpeed.visFn = function() return S.Cfg.rainbow end
+    rSpeed.showT = rSpeed.visFn() and 1 or 0
     local sSurf = S.addSection(S.SETTINGS_TAB, "SURFACES", "left")
     sSurf.psub = "Theme"
     sw(sSurf, "Cards", "Panel", "panelColor")
@@ -5245,8 +5160,8 @@ function S.relayoutRaw()
     S.D.sidebar.Color = S.Theme.Dark
     S.D.topbar.Color = S.Theme.Dark
     -- sidebar + topbar (+ the rounded inward corner joining them): a second layer on top of main on purpose, for
-    -- their darker shade; the content area stays the one main layer = the intro bg 1:1. Rainbow: 0.9 over its busy bg.
-    local openA = ((S.Cfg.preset == "Rainbow") and 0.9 or S.Const.ALPHA_BAR) * S.Cfg.opacity
+    -- their darker shade; the content area stays the one main layer = the intro bg 1:1.
+    local openA = S.Const.ALPHA_BAR * S.Cfg.opacity
     S.D.sidebar.Transparency = openA
     S.D.topbar.Transparency = openA
     do -- inward corner (off Matcha): same colour + fade as the bars it joins
@@ -5336,7 +5251,7 @@ function S.relayoutRaw()
     S.D.layReset.Position = Vector2.new(pX - 44, y + 12)
     S.ResetRect = S.LayoutEdit and { x = pX - 48, y = y + 6, w = 42, h = 22 } or nil
     S.D.title.Text = S.truncateB(titleName, w - lw - 16 - 50 - searchW - (S.LayoutEdit and 70 or 26))
-    if S.Cfg.preset == "Nyan" and not S.Cfg.perfMode then
+    if S.Cfg.preset == "Rainbow" and not S.Cfg.perfMode then
         -- Measure after title truncation; reserve the first control's entire hit area, including Reset while editing.
         S.Nyan.left = S.D.title.Position.X + S.TW(S.D.title, S.CHAR_WB) + 12
         S.Nyan.right = (S.ResetRect or S.PencilRect).x - 8
@@ -5529,29 +5444,6 @@ function S.relayoutRaw()
                     S.perfBootMark("themeTgaEnd")
                 end)
             end
-        end
-        -- nyan background on the Rainbow theme, fit to its real aspect ratio (never stretched)
-        local nyan = S.Win.visible and not S.Cfg.perfMode and S.Cfg.themeImg ~= false and S.Cfg.themeImgUrl == "" and S.Cfg.preset == "Rainbow"
-        if nyan then S.loadNyan() end
-        S.D.nyan.Visible = nyan and UI.nyanData0 ~= nil
-        local nW, nH
-        if nyan then
-            local nRatio = UI.nyanRatio or 1
-            local nMaxH = h - S.TB - 6
-            nW = math.max(1, math.floor(math.min(nMaxH * nRatio, cw)))
-            nH = math.max(1, math.floor(math.min(nMaxH, cw / nRatio)))
-            local nX = cx + math.floor((cw - nW) / 2)
-            local nY = y + S.TB + 2 + math.floor((nMaxH - nH) / 2)
-            UI.nyanRect = { x = nX, y = nY, w = nW, h = nH }
-            S.D.nyan.Position = Vector2.new(nX, nY)
-            S.D.nyan.Size = Vector2.new(nW, nH)
-        end
-        S.blurNyan(nW and S.devPx(nW), nH and S.devPx(nH), blurPx)
-        if nyan and UI.nyanData0 and not UI.nyanApplied then
-            local frames = UI.nyanBlurFrames or UI.nyanData
-            local idx = UI.nyanCur or 1
-            pcall(function() S.D.nyan.Data = frames[idx] or UI.nyanData0 end)
-            UI.nyanApplied, UI.nyanCur = true, idx
         end
     end
     local page = S.Pages[S.activeTab]
@@ -5923,14 +5815,16 @@ function S.relayoutRaw()
                         row.sw.Color = row.color
                     elseif row.kind == "keybind" then
                         row.lbl.Position = Vector2.new(innerX, ry + 10)
-                        local kw = math.max(34, #S.rowKeyName(row) * S.CHAR_W + 14)
+                        local kw = math.max(34, math.ceil(S.textWidth(S.rowKeyName(row), S.FS - 1, row.chipT.Font) + 14))
                         row.kw = kw
                         row.lbl.Text = S.truncate(row.label, innerW - kw - 10)
                         row.chip.Position = Vector2.new(sx + swid - 12 - kw, ry + 8)
                         row.chip.Size = Vector2.new(kw, 17)
-                        row.chip.Corner = S.CR(3)
-                        row.chipX = sx + swid - 12 - kw
-                        row.chipY = ry + 8
+                        row.chip.Corner = S.CR(4)
+                        row.oline.Position, row.oline.Size, row.oline.Corner = row.chip.Position, Vector2.new(kw, 17), S.CR(4)
+                        row.chipRect = { x = sx + swid - 12 - kw, y = ry + 8, w = kw, h = 17 }
+                        row.chipT.Text = (S.Capture.row == row) and "..." or S.rowKeyName(row)
+                        row.chipT.Position = Vector2.new(row.chipRect.x + math.floor((kw - S.TW(row.chipT, S.CHAR_W - 1)) / 2), row.chipRect.y + 2)
                     elseif row.kind == "textbox" then
                         row.lbl.Position = Vector2.new(innerX, ry + 3)
                         row.lbl.Text = S.truncate(row.label, innerW)
@@ -6613,11 +6507,14 @@ function S.updateControls(dt, mx, my)
                         if row.hasAlpha then row.sw.Transparency = math.max(0.15, row.alpha or 1) * S.Cfg.opacity end
                     elseif row.kind == "keybind" then
                         row.lbl.Color = S.lerpColor(S.Theme.Text, S.Theme.White, row.hovT)
-                        row.chipT.Text = (S.Capture.row == row) and "..." or S.rowKeyName(row)
-                        if row.chipX then
-                            row.chipT.Position = Vector2.new(row.chipX + math.floor(((row.kw or 34) - S.TW(row.chipT, S.CHAR_W - 1)) / 2), row.chipY + 2)
+                        local listening = S.Capture.row == row
+                        row.chipT.Text = listening and "..." or S.rowKeyName(row)
+                        if row.chipRect then
+                            row.chipT.Position = Vector2.new(row.chipRect.x + math.floor((row.chipRect.w - S.TW(row.chipT, S.CHAR_W - 1)) / 2), row.chipRect.y + 2)
                         end
-                        row.chip.Color = (S.Capture.row == row) and S.lerpColor(S.Theme.Control, S.Theme.C1, 0.3) or S.Theme.Control
+                        row.chip.Color = listening and S.lerpColor(S.Theme.Control, S.Theme.White, 0.08) or S.Theme.Control
+                        row.oline.Color = listening and S.Theme.C1 or S.lerpColor(S.Theme.Track, S.Theme.C1, row.hovT)
+                        row.chipT.Color = S.Theme.Text
                     elseif row.kind == "textbox" then
                         row.box.Color = (S.Focus.row == row) and S.lerpColor(S.Theme.Control, S.Theme.White, 0.08) or S.Theme.Control
                         row.oline.Color = (S.Focus.row == row) and S.Theme.C1 or S.lerpColor(S.Theme.Track, S.Theme.C1, row.hovT)
@@ -7281,7 +7178,7 @@ function S.newOverlay(opts)
         minW = opts.MinWidth or 160, empty = opts.EmptyText or "None",
         rows = {}, visible = opts.Visible ~= false, dirty = true, font = font,
         L = {}, R = {}, lTxt = {}, rTxt = {}, lCol = {}, rCol = {},
-        chips = {}, washes = {}, tags = {}, seen = {}, actT = {}, countText = "",
+        chips = {}, chipLines = {}, chipHov = {}, washes = {}, tags = {}, seen = {}, actT = {}, countText = "",
     }, S.Overlay)
     ov.bg = S.New("Square", { Filled = true, Color = S.Theme.Dark, Transparency = 0.9, ZIndex = 20, Corner = S.CR(5), Visible = false })
     ov.edge = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 21, Corner = S.CR(5), Visible = false })
@@ -7301,6 +7198,7 @@ function S.Overlay:SetRows(rows)
             l = tostring(r.Left or r[1] or ""), r = tostring(r.Right or r[2] or ""),
             lc = r.Color or r[3], rc = r.RightColor or r[4],
             active = (r.Active or r.active) and true or false, tag = r.Tag or r.tag, chip = (r.Chip or r.chip) and true or false,
+            keyRow = r.KeyRow,
         }
         -- Key = stable identity for the row-in animation / active wash (default: the left text). A row whose left text
         -- changes every update (such as the watermark's FPS) can keep its animation state by supplying a stable Key.
@@ -7314,16 +7212,19 @@ function S.Overlay:SetTitle(t) self.title = tostring(t) self.dirty = true return
 function S.Overlay:SetVisible(v) self.visible = v and true or false self.dirty = true return self end
 function S.Overlay:IsVisible() return self.visible end
 
-function S.ovRowObjs(ov, i)
+function S.ovRowObjs(ov, i, keyChip)
     if not ov.L[i] then
         ov.L[i] = S.New("Text", { Text = "", Color = S.Theme.Text, Transparency = 1, ZIndex = 22, Font = ov.font, Size = S.FS, Visible = false })
-        ov.R[i] = S.New("Text", { Text = "", Color = S.Theme.Dim, Transparency = 1, ZIndex = 23, Font = ov.font, Size = S.FS - 1, Visible = false })
-        ov.chips[i] = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = 0, ZIndex = 22, Corner = 4, Visible = false })
+        ov.R[i] = S.New("Text", { Text = "", Color = keyChip and S.Theme.Text or S.Theme.Dim, Transparency = 1, ZIndex = 23, Font = ov.font, Size = S.FS - 1, Visible = false })
+        ov.chips[i] = S.New("Square", { Filled = true, Color = S.Theme.Control, Transparency = keyChip and S.Const.ALPHA_CTRL or 0, ZIndex = 21, Corner = 4, Visible = false })
         ov.tags[i] = S.New("Text", { Text = "", Color = S.Theme.Dim, Transparency = 0, ZIndex = 22, Font = ov.font, Size = S.FS - 3, Visible = false })
         local ramp = S.FX.ok and S.FX.get("tabRamp", 256, 2, function(px) return (1 - px / 256) ^ 1.6 end)
         if ramp then ov.washes[i] = S.New("Image", { Data = ramp, Color = S.Theme.C1, Transparency = 0, ZIndex = 21, Visible = false, Size = Vector2.new(1, 1) }) end
     end
-    return ov.L[i], ov.R[i], ov.chips[i], ov.washes[i], ov.tags[i]
+    if keyChip and not ov.chipLines[i] then
+        ov.chipLines[i] = S.New("Square", { Filled = false, Color = S.Theme.Track, Transparency = 0.55, ZIndex = 22, Corner = 4, Visible = false })
+    end
+    return ov.L[i], ov.R[i], ov.chips[i], ov.washes[i], ov.tags[i], ov.chipLines[i]
 end
 
 -- docked overlay (the keybind overlay): sits beside the open menu's top-right corner and follows it; with the menu
@@ -7423,7 +7324,7 @@ function S.layoutOverlay(ov)
     for i = 1, n do
         local r = list[i]
         if r and show then
-            local L, R, chip, wash, tag = S.ovRowObjs(ov, i)
+            local L, R, chip, wash, tag, oline = S.ovRowObjs(ov, i, r.keyRow ~= nil)
             local k = 1
             if #rows > 0 then
                 local rk = r.key or r.l
@@ -7450,14 +7351,29 @@ function S.layoutOverlay(ov)
             L.Color = r.lc or S.lerpColor(S.Theme.Text, S.Theme.White, at)
             L.Position, L.Transparency = Vector2.new(x + pad, math.floor(cy - S.TH(L, S.FS) / 2 + 0.5)), k * op
             local rx = x + w - pad
+            if oline then oline.Visible = false end
             if r.chip and r.r ~= "" then
-                local cw = S.TW(R) + 12
+                local cw = r.keyRow and math.max(34, math.ceil(S.textWidth(S.rowKeyName(r.keyRow), S.FS - 1, R.Font) + 14)) or (S.TW(R) + 12)
                 rx = rx - cw
                 chip.Visible = true
                 chip.Position, chip.Size, chip.Corner = Vector2.new(rx, ry + 3), Vector2.new(cw, rowH - 6), S.CR(4)
                 chip.Color, chip.Transparency = S.lerpColor(S.Theme.Control, S.Theme.C1, 0.18 * at), 0.9 * k * op
                 R.Position = Vector2.new(rx + 6, math.floor(cy - S.TH(R, S.FS - 1) / 2 + 0.5))
                 R.Color = r.rc or S.lerpColor(S.Theme.Dim, S.Theme.C1, at)
+                if r.keyRow then
+                    local by = math.floor(cy - 17 / 2)
+                    local hovered = S.hoverOn() and not S.Drop.open and not S.Pick.open and S.inRect(S.In.x, S.In.y, x, ry, w, rowH)
+                    local hoverEase = S.animOn() and (1 - 0.000001 ^ (S.frameDt or 1 / 60)) or 1
+                    local hv = (ov.chipHov[i] or 0) + ((hovered and 1 or 0) - (ov.chipHov[i] or 0)) * hoverEase
+                    ov.chipHov[i] = hv
+                    local listening = S.Capture.row == r.keyRow
+                    chip.Position, chip.Size = Vector2.new(rx, by), Vector2.new(cw, 17)
+                    chip.Color, chip.Transparency = listening and S.lerpColor(S.Theme.Control, S.Theme.White, 0.08) or S.Theme.Control, S.Const.ALPHA_CTRL * k * op
+                    oline.Position, oline.Size, oline.Corner = chip.Position, Vector2.new(cw, 17), S.CR(4)
+                    oline.Color = listening and S.Theme.C1 or S.lerpColor(S.Theme.Track, S.Theme.C1, hv)
+                    oline.Transparency, oline.Visible = 0.55 * k * op, true
+                    R.Position, R.Color = Vector2.new(rx + math.floor((cw - S.TW(R, S.CHAR_W - 1)) / 2), by + 2), S.Theme.Text
+                end
             else
                 chip.Visible = false
                 R.Position = Vector2.new(rx - S.TW(R), math.floor(cy - S.TH(R, S.FS - 1) / 2 + 0.5))
@@ -7477,6 +7393,7 @@ function S.layoutOverlay(ov)
         elseif ov.L[i] then
             ov.L[i].Visible, ov.R[i].Visible, ov.chips[i].Visible, ov.tags[i].Visible = false, false, false, false
             if ov.washes[i] then ov.washes[i].Visible = false end
+            if ov.chipLines[i] then ov.chipLines[i].Visible = false end
         end
     end
 end
@@ -7501,11 +7418,11 @@ function S.updateKeybindOverlay(dt)
             -- a bind with a Mode is "on" by its state (toggled / held / always); a plain bind while its key is down
             local active = held
             if r.mode then active = r.keyState == true end
-            local key = S.rowKeyName(r)
+            local key = S.Capture.row == r and "..." or S.rowKeyName(r)
             local tag = r.mode and r.mode:lower() or nil
             if active then on = on + 1 end
             if active or not S.Cfg.kbActiveOnly then
-                rows[#rows + 1] = { Left = r.label, Right = key, Active = active, Tag = tag, Chip = true }
+                rows[#rows + 1] = { Left = r.label, Right = key, Active = active, Tag = tag, Chip = true, KeyRow = r }
                 sig[#sig + 1] = r.label .. key .. (active and "1" or "0") .. (tag or "")
             end
         end
@@ -7575,7 +7492,7 @@ function S.updateOverlays(dt)
                 S.markChanged()
             end
         end
-        local layout = ov.dirty or ov.anim
+        local layout = ov.dirty or ov.anim or (ov == S.KeybindOverlay and ov.visible)
         if layout then S.layoutOverlay(ov) end
         if ov.visible and UI.created and ov.dx then
             if halo and ov.haloKey then
@@ -7867,7 +7784,6 @@ S.errCount = 0
 S.lastClock = os.clock()
 S.runT = 0
 S.saveTimer = 0
-S.nyanClock = 0
 
 function S.curPage() return S.Pages[S.activeTab] end
 
@@ -8912,29 +8828,11 @@ function S.frame()
     local x, y, w, h = S.Win.x, S.Win.y, S.Win.w, S.Win.h
     S.Sb.max = S.sbMax()
 
-    if (S.Cfg.preset == "Rainbow" or S.Cfg.preset == "Nyan") and not S.Cfg.perfMode then
+    if S.Cfg.rainbow and not S.Cfg.perfMode then
         S.hue = (S.hue + dt * (S.Cfg.rainbowSpeed / 100) * 0.15) % 1
         S.Theme.C1 = S.hsv2rgb(S.hue, 0.5, 0.85)
         S.Theme.C2 = S.hsv2rgb((S.hue + 0.08) % 1, 0.55, 0.9)
-        if S.Cfg.preset == "Rainbow" then
-            S.Theme.Dark = S.hsv2rgb(S.hue, 0.55, 0.32)   -- sidebar + topbar cycle too; light Mono bg stays
-        end
         S.Win.dirty = true
-    end
-
-    -- nyan background frame animation (swaps Data + touches Position so Matcha re-decodes)
-    if S.D.nyan.Visible and not S.Cfg.perfMode and #S.Const.NYAN_FRAMES > 1 and UI.nyanData and UI.nyanRect then
-        S.nyanClock = S.nyanClock + dt
-        local n = #S.Const.NYAN_FRAMES
-        local idx = (math.floor(S.nyanClock * S.Const.NYAN_FPS) % n) + 1
-        local frames = UI.nyanBlurFrames or UI.nyanData
-        if idx ~= UI.nyanCur and frames[idx] then
-            pcall(function()
-                S.D.nyan.Data = frames[idx]
-                S.D.nyan.Position = Vector2.new(UI.nyanRect.x, UI.nyanRect.y)
-            end)
-            UI.nyanCur = idx
-        end
     end
 
     -- dropdown open/close animation (slide + fade); teardown happens when the close anim finishes
@@ -9628,8 +9526,6 @@ function UI.Unload()
     if S.Perf then S.perfCancelPending("unloaded") end
     if S.Perf.started then pcall(S.perfSend, "unload") end -- before S.unloaded / disconnects
     S.unloaded = true -- every Drawing write of this instance becomes a no-op (see S.scaleDrawing)
-    UI.nyanBlurKey, UI.nyanBlurJob, UI.nyanBlurFrames = nil, nil, nil
-    UI.nyanDecoded = nil
     for _, fn in ipairs(S.onUnloadList) do pcall(fn) end -- let the consumer script stop its loops/ESP too
     if UI.Conn then pcall(function() UI.Conn:Disconnect() end) end
     if not S.Env.matcha then pcall(function() S.RunService:UnbindFromRenderStep("LSBlur") end) end
@@ -9643,7 +9539,6 @@ function UI.Unload()
     UI.Objects = {}
     S.setGameInput(true)
     if S.blockGui then pcall(function() S.blockGui:Destroy() end) S.blockGui = nil end
-    print("unloaded")
 end
 
 -- ========== public API ==========
@@ -10075,8 +9970,8 @@ function S.ctxFromRow()
         if sec.vis then
             for _, row in ipairs(sec.rows) do
                 local r = row.rect
-                if row.vis and row.flag and r and S.inRect(mx, my, r.x, r.y, r.w, r.h) then
-                    local flag = row.flag
+                local flag = row.flag or row.favKey
+                if row.vis and flag and r and S.inRect(mx, my, r.x, r.y, r.w, r.h) then
                     local fav = S.isFav(flag)
                     S.ctxOpen(mx, my, tostring(row.label or flag), {
                         { Text = fav and "Remove from favorites" or "Add to favorites", Callback = function() S.setFav(flag, not fav) end } })
@@ -10086,7 +9981,7 @@ function S.ctxFromRow()
         end
     end
 end
--- favorites: list of flags, saved as "_favs" with the UI state; Home "Own" shows them as tiles (sorted by menu order)
+-- Favorites store flags or stable button keys in "_favs"; missing controls are ignored.
 S.FavHooks = {}
 function S.favList()
     if not S.Favs then
@@ -10106,7 +10001,17 @@ function S.setFav(flag, on)
     S.Favs = list
     S.markChanged()
     for _, fn in ipairs(S.FavHooks) do pcall(fn) end
-    S.toast(on and "Added to favorites" or "Removed from favorites", tostring(S.FlagRows[flag] and S.FlagRows[flag].label or flag), 2)
+    local label = S.FlagRows[flag] and S.FlagRows[flag].label
+    if not label then
+        for _, page in pairs(S.Pages) do
+            if not page.isHome then
+                for _, sec in ipairs(page.allSections or page.sections) do
+                    for _, row in ipairs(sec.rows) do if row.favKey == flag then label = row.label end end
+                end
+            end
+        end
+    end
+    S.toast(on and "Added to favorites" or "Removed from favorites", tostring(label or flag), 2)
 end
 -- favorites in menu order: tab, then card, then row (Home pages and Settings skipped). Returns { { row = , tab = } }
 function S.favSorted()
@@ -10115,10 +10020,11 @@ function S.favSorted()
     local out = {}
     for ti = 1, #S.Tabs do
         local page = S.Pages[ti]
-        if page and not page.isHome then
-            for _, sec in ipairs(page.sections) do
+        if page and not page.isHome and ti ~= S.SETTINGS_TAB then
+            for _, sec in ipairs(page.allSections or page.sections) do
                 for _, row in ipairs(sec.rows) do
-                    if row.flag and want[row.flag] then out[#out + 1] = { row = row, tab = ti } want[row.flag] = nil end
+                    local key = row.flag or row.favKey
+                    if key and want[key] then out[#out + 1] = { row = row, tab = ti } want[key] = nil end
                 end
             end
         end
@@ -10276,12 +10182,15 @@ function S.Library:CreateHome(opts)
             elseif orig.kind == "slider" then
                 m.row = S.addSlider(sec, orig.label, orig.min, orig.max, orig.value, orig.suffix, nil, push)
                 m.row.inc = orig.inc
+            elseif orig.kind == "button" then
+                m.row = S.addButton(sec, orig.label, function() if not orig.disabled and orig.onClick then orig.onClick() end end)
             elseif orig.kind == "dropdown" then
                 local v = orig.value
                 m.row = S.addDropdown(sec, orig.label, orig.options, type(v) == "table" and table.clone(v) or v, nil, push, orig.multi)
             else
                 m.row = S.addButton(sec, orig.label .. "  ->  " .. (S.Tabs[ti] and S.Tabs[ti].name or ""), function() S.switchTab(ti) end)
             end
+            m.row.disabled = orig.disabled
             fav.rows[#fav.rows + 1] = m
         end
         fsec:_refresh()
@@ -10361,6 +10270,7 @@ function S.Library:CreateHome(opts)
 end
 
 function S.Library:SetPreset(name)
+    if name == "Nyan" then name = "Rainbow" end
     if S.Presets[name] or name == "Custom" then self:SetFlag("preset", name) end
     S.Win.dirty = true
 end
