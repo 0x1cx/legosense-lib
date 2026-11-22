@@ -2959,6 +2959,63 @@ S.Capture = { row = nil }
 S.Focus = { row = nil }
 S.keyStates = {}
 
+-- Only the theme image URL may use native text input (for OS paste without clipboard reads).
+function S.stopThemeUrlInput(commit)
+    local input = S.ThemeUrlInput
+    if not input then return end
+    if commit and input.sync then pcall(input.sync) end
+    S.ThemeUrlInput = nil -- disconnect before releasing focus, so FocusLost cannot commit twice
+    for _, conn in ipairs(input.conns) do pcall(function() conn:Disconnect() end) end
+    if input.box then
+        pcall(function() input.box:ReleaseFocus() end)
+        pcall(function() input.box:Destroy() end)
+    end
+    if S.Focus.row == input.row then
+        if commit and input.row.finished then S.fireRow(input.row) end
+        S.Focus.row = nil
+    end
+    S.Win.dirty = true
+end
+function S.startThemeUrlInput(row)
+    if row ~= S.rThemeImgUrl or S.Env.matcha or S.ThemeUrlInput then return end
+    local input = { row = row, conns = {} }
+    S.ThemeUrlInput = input
+    local ok = pcall(function()
+        local box = Instance.new("TextBox")
+        input.box = box
+        box.Name = "Input"
+        box.BackgroundTransparency, box.TextTransparency = 1, 1
+        box.Position, box.Size = UDim2.fromOffset(-10000, -10000), UDim2.fromOffset(1, 1)
+        box.ClearTextOnFocus, box.MultiLine = false, false
+        box.Text = row.value
+        local parent
+        if type(gethui) == "function" then
+            local got, hui = pcall(gethui)
+            if got then parent = hui end
+        end
+        box.Parent = parent or game:GetService("CoreGui")
+        local function sync()
+            if S.ThemeUrlInput ~= input or S.Focus.row ~= row then return end
+            row.value = box.Text:gsub("[\r\n]", "")
+            S.Win.dirty = true
+        end
+        input.sync = sync
+        input.conns[#input.conns + 1] = box:GetPropertyChangedSignal("Text"):Connect(sync)
+        input.conns[#input.conns + 1] = box.FocusLost:Connect(function()
+            if S.ThemeUrlInput ~= input then return end
+            sync()
+            S.stopThemeUrlInput(true) -- Enter, Escape and click-away all finish a normal textbox
+        end)
+        box:CaptureFocus()
+        assert(box:IsFocused())
+        sync()
+    end)
+    if not ok then
+        S.stopThemeUrlInput(false)
+        S.Focus.row = row -- silently retain the Drawing-only input path if native focus fails
+    end
+end
+
 -- ========== components ==========
 S.Pages = {}
 S.FlagRows = {}
@@ -4042,6 +4099,7 @@ function S.setPageVisible(tabIdx, v)
         S.Scroll.hide(sec.bar)
         sec.sbGeo = nil
         for _, row in ipairs(sec.rows) do
+            if not v and S.ThemeUrlInput and S.ThemeUrlInput.row == row then S.stopThemeUrlInput(false) end
             local rv = v and (row.showT == nil or row.showT > 0.02) -- hidden sub-tab / conditional rows stay hidden
             for _, o in ipairs(S.rowObjs(row)) do o.Visible = rv end
         end
@@ -4691,6 +4749,11 @@ end
 S.SETTINGS_SUBS = { "Theme", "Effects", "Interface", "Overlays", "Configs" }
 -- hide every drawing of a card (used for Settings cards on another sub-tab)
 function S.hideSection(sec)
+    if S.ThemeUrlInput then
+        for _, row in ipairs(sec.rows) do
+            if S.ThemeUrlInput and S.ThemeUrlInput.row == row then S.stopThemeUrlInput(false) end
+        end
+    end
     sec.hdr.Visible = false
     for _, s in ipairs(sec.hsegs) do s.Visible = false end
     sec.panel.Visible, sec.glow.Visible, sec.grip.Visible = false, false, false
@@ -4881,8 +4944,10 @@ do
     S.addSlider(sStyle, "UI scale", 75, 160, 115, " %", "uiScale", function(v) S.Cfg.uiScale = v S.setScale(v) S.markChanged() end)
     S.addToggle(sStyle, "Checkbox style", false, "checkbox", function(v) S.Cfg.checkbox = v S.Win.dirty = true S.markChanged() end).tip = "Square checkboxes instead of pills"
 
-    S.addToggle(sStyle, "Theme image", true, "themeImg", on("themeImg")).tip = "Show the theme's picture or your own image"
-    S.rThemeImgUrl = S.addTextbox(sStyle, "Image URL", "", "themeImgUrl", function(text)
+    local sThemeImg = S.addSection(S.SETTINGS_TAB, "THEME IMAGE", "right")
+    sThemeImg.psub = "Theme"
+    S.addToggle(sThemeImg, "Theme image", true, "themeImg", on("themeImg")).tip = "Show the theme's picture or your own image"
+    S.rThemeImgUrl = S.addTextbox(sThemeImg, "Image URL", "", "themeImgUrl", function(text)
         local url = S.normalizeThemeImageUrl(text)
         if url == nil then
             if S.rThemeImgUrl then S.rThemeImgUrl.value = S.Cfg.themeImgUrl end
@@ -4899,9 +4964,9 @@ do
     S.rThemeImgUrl.finished = true
     S.rThemeImgUrl.value = S.Cfg.themeImgUrl
     S.rThemeImgUrl.tip = "Paste a direct image link and press Enter. Leave blank to use the theme's image. Saved with your UI settings."
-    S.addSlider(sStyle, "Theme image opacity", 0, 100, 100, " %", "themeImgA", function(v) S.Cfg.themeImgA = v S.applyAlphas() S.markChanged() end)
+    S.addSlider(sThemeImg, "Theme image opacity", 0, 100, 100, " %", "themeImgA", function(v) S.Cfg.themeImgA = v S.applyAlphas() S.markChanged() end)
     if not S.Env.matcha then
-        S.addSlider(sStyle, "Theme image blur", 0, 20, 0, " px", "themeImgBlur", function(v) S.Cfg.themeImgBlur = v S.Win.dirty = true S.markChanged() end).tip = "Blurs the theme's background picture"
+        S.addSlider(sThemeImg, "Theme image blur", 0, 20, 0, " px", "themeImgBlur", function(v) S.Cfg.themeImgBlur = v S.Win.dirty = true S.markChanged() end).tip = "Blurs the theme's background picture"
     end
     local sShare = S.addSection(S.SETTINGS_TAB, "SHARE", "right")
     sShare.psub = "Theme"
@@ -4912,18 +4977,22 @@ do
     S.addNote(sShare, "Copy theme puts your look on the clipboard. Paste theme applies one copied from someone else.")
     S.loadYield()
     -- ===== Effects =====
+    local sPerf = S.addSection(S.SETTINGS_TAB, "PERFORMANCE", "left")
+    sPerf.psub = "Effects"
+    S.addToggle(sPerf, "Performance mode", false, "perfMode", S.setPerfMode).tip = "Skips the intro and animations, hover FX, ripples, snow, rainbow cycling and animated art, glows, glass and blur, notification effects, and the keybind and watermark overlays."
     local sMotion = S.addSection(S.SETTINGS_TAB, "MOTION", "left")
     sMotion.psub = "Effects"
     S.addToggle(sMotion, "Animations", true, "animations", function(v) S.Cfg.animations = v S.markChanged() end)
-    S.addToggle(sMotion, "Intro animation", true, "intro", function(v) S.Cfg.intro = v S.markChanged() end).tip = "Loading card before the menu first opens"
-    if not S.Env.matcha then S.addButton(sMotion, "Replay intro", function() S.Library:PlayIntro() end) end -- no intro on Matcha
     S.addToggle(sMotion, "Hover effects", true, "hoverFx", function(v) S.Cfg.hoverFx = v S.markChanged() end)
-    S.addToggle(sMotion, "Performance mode", false, "perfMode", S.setPerfMode).tip = "Skips the intro and animations, hover FX, ripples, snow, rainbow cycling and animated art, glows, glass and blur, notification effects, and the keybind and watermark overlays."
 
     S.addSlider(sMotion, "Animation speed", 25, 300, 100, " %", "animSpeed", function(v) S.Cfg.animSpeed = v S.markChanged() end)
     S.addToggle(sMotion, "Cascade on tab switch", true, "cascSwitch", on("cascSwitch")).tip = "Cards rise in one after another when a tab opens"
     S.addToggle(sMotion, "Click ripple", true, "ripples", on("ripples"))
     S.addToggle(sMotion, "Overscroll bounce", true, "overscroll", on("overscroll")).tip = "The stretch and bulge when you scroll past the end"
+    local sIntro = S.addSection(S.SETTINGS_TAB, "INTRO & UNLOAD", "right")
+    sIntro.psub = "Effects"
+    S.addToggle(sIntro, "Intro animation", true, "intro", function(v) S.Cfg.intro = v S.markChanged() end).tip = "Loading card before the menu first opens"
+    if not S.Env.matcha then S.addButton(sIntro, "Replay intro", function() S.Library:PlayIntro() end) end -- no intro on Matcha
     local sGlow = S.addSection(S.SETTINGS_TAB, "GLOW", "right")
     sGlow.psub = "Effects"
     S.addToggle(sGlow, "Glows", true, "glows", on("glows")).tip = "Master switch for all glows, including controls, panels, notifications and the intro"
@@ -4957,24 +5026,29 @@ do
     local sMenu = S.addSection(S.SETTINGS_TAB, "MENU", "left")
     sMenu.psub = "Interface"
     S.addKeybind(sMenu, "Menu key", 0x24, "menuKey", function(vk) S.Cfg.menuKey = vk S.markChanged() end)
-    -- Auto = opens on hover, Expanded = always open, Collapsed = icons only. The pin beside the sidebar title flips Auto <-> Expanded.
-    -- S.Cfg.collapseSidebar stays as the derived "never opens" flag (gear placement reads it); old configs with it on load as Collapsed (S.loadSnapshot)
-    S.addDropdown(sMenu, "Sidebar", { "Auto", "Expanded", "Collapsed" }, "Auto", "sidebarMode", function(v)
-        S.Cfg.sidebarMode = v
-        S.Cfg.collapseSidebar = (v == "Collapsed")
-        S.Win.dirty = true
-        S.markChanged()
-    end).tip = "Auto opens on hover, Expanded stays open, Collapsed shows icons only"
     S.addDropdown(sMenu, "Search", { "Bar", "Off" }, "Bar", "search", function(v) S.Cfg.search = v S.Win.dirty = true S.markChanged() end)
-    S.addDropdown(sMenu, "Tab layout", { "Sidebar" }, "Sidebar", "tabLayout", function(v) S.Cfg.tabLayout = v S.markChanged() end)
     S.addToggle(sMenu, "Inline dropdowns", false, "inlineDropdowns", function(v) S.Cfg.inlineDropdowns = v S.markChanged() end).tip = "Coming soon: expand in place instead of popout"
     S.addToggle(sMenu, "Block Roblox input", true, "blockInput", function(v)
         S.Cfg.blockInput = v
         S.setGameInput(not (v and S.Win.visible)) -- apply now if the menu is open
         S.markChanged()
     end).tip = "Stop Matcha's input reaching the game while the menu is open"
-    S.addToggle(sMenu, "Anti-AFK", true, "antiAfk", on("antiAfk")).tip = "Stops Roblox kicking you for being idle 20 minutes"
-    S.addToggle(sMenu, "Share performance data", true, "perfShare", function(v)
+    local sSidebar = S.addSection(S.SETTINGS_TAB, "SIDEBAR", "left")
+    sSidebar.psub = "Interface"
+    -- Auto = opens on hover, Expanded = always open, Collapsed = icons only. The pin beside the sidebar title flips Auto <-> Expanded.
+    -- S.Cfg.collapseSidebar stays as the derived "never opens" flag (gear placement reads it); old configs with it on load as Collapsed (S.loadSnapshot)
+    S.addDropdown(sSidebar, "Sidebar", { "Auto", "Expanded", "Collapsed" }, "Auto", "sidebarMode", function(v)
+        S.Cfg.sidebarMode = v
+        S.Cfg.collapseSidebar = (v == "Collapsed")
+        S.Win.dirty = true
+        S.markChanged()
+    end).tip = "Auto opens on hover, Expanded stays open, Collapsed shows icons only"
+    S.addSlider(sSidebar, "Sidebar width", 20, 40, 27, " %", "sbWidth", function(v) S.Cfg.sbWidth = v S.Sb.max = S.sbMax() S.Win.dirty = true S.markChanged() end)
+    S.addDropdown(sSidebar, "Tab layout", { "Sidebar" }, "Sidebar", "tabLayout", function(v) S.Cfg.tabLayout = v S.markChanged() end)
+    local sGeneral = S.addSection(S.SETTINGS_TAB, "GENERAL", "left")
+    sGeneral.psub = "Interface"
+    S.addToggle(sGeneral, "Anti-AFK", true, "antiAfk", on("antiAfk")).tip = "Stops Roblox kicking you for being idle 20 minutes"
+    S.addToggle(sGeneral, "Share performance data", true, "perfShare", function(v)
         S.Cfg.perfShare = v
         if S.Perf and S.Perf.consentReady then
             if v then S.perfPrepare() else S.perfCancelPending("disabled") end
@@ -4982,9 +5056,13 @@ do
         S.Win.dirty = true S.markChanged()
     end).tip = "Share UI frame timing and graphics diagnostics with the LegoSense UI owner through its private sender. Includes your Roblox username, user ID and game. Only sends when the owner configures that sender; diagnostics are also saved locally."
 
-    S.addDropdown(sMenu, "Open on", { "Last used", "Home" }, "Last used", "openTab", function(v) S.Cfg.openTab = v S.markChanged() end).tip = "Which tab shows when the menu loads"
-    S.addToggle(sMenu, "Remember window position", false, "rememberPos", on("rememberPos")).tip = "Off: the window always opens centred"
-    S.addSlider(sMenu, "Sidebar width", 20, 40, 27, " %", "sbWidth", function(v) S.Cfg.sbWidth = v S.Sb.max = S.sbMax() S.Win.dirty = true S.markChanged() end)
+    local sWindow = S.addSection(S.SETTINGS_TAB, "WINDOW", "right")
+    sWindow.psub = "Interface"
+    S.addButton(sWindow, "Re-center window", function() S.centerWin() end)
+    S.addButton(sWindow, "Minimize", function() end)
+    S.addButton(sWindow, "Unload UI", function() UI.Unload() end)
+    S.addDropdown(sWindow, "Open on", { "Last used", "Home" }, "Last used", "openTab", function(v) S.Cfg.openTab = v S.markChanged() end).tip = "Which tab shows when the menu loads"
+    S.addToggle(sWindow, "Remember window position", false, "rememberPos", on("rememberPos")).tip = "Off: the window always opens centred"
     local sSpot = S.addSection(S.SETTINGS_TAB, "SPOTLIGHT", "right")
     sSpot.psub = "Interface"
     S.addToggle(sSpot, "Spotlight", true, "spotOn", on("spotOn")).tip = "Ctrl + key opens a search over the game"
@@ -5069,13 +5147,10 @@ do
         { label = "Import", cb = function() S.cfgImport() end },
     })
     S.addNote(sMan, "Rename / Duplicate use the Name box. Export copies the selected config; Import saves the clipboard (or configs/import.json) as Name.")
-    local sSys = S.addSection(S.SETTINGS_TAB, "WINDOW", "right")
-    sSys.psub = "Configs"
-    S.addButton(sSys, "Re-center window", function() S.centerWin() end)
-    S.addButton(sSys, "Minimize", function() end)
-    S.addButton(sSys, "Unload UI", function() UI.Unload() end)
-    S.addButton(sSys, "Reset script settings", function() S.confirm("Reset script settings?", "Every option of this script goes back to its default. The look stays.", function() S.resetFlags(false) end) end)
-    S.addButton(sSys, "Reset UI settings", function() S.confirm("Reset UI settings?", "Theme, effects, interface and overlay settings go back to their defaults, for every script.", function() S.resetFlags(true) end) end)
+    local sReset = S.addSection(S.SETTINGS_TAB, "RESET", "right")
+    sReset.psub = "Configs"
+    S.addButton(sReset, "Reset script settings", function() S.confirm("Reset script settings?", "Every option of this script goes back to its default. The look stays.", function() S.resetFlags(false) end) end)
+    S.addButton(sReset, "Reset UI settings", function() S.confirm("Reset UI settings?", "Theme, effects, interface and overlay settings go back to their defaults, for every script.", function() S.resetFlags(true) end) end)
     -- everything made so far is a UI (global) setting; script tabs come later
     for flag in pairs(S.FlagRows) do S.UIFlags[flag] = true end
     S.pageFilter(S.Pages[S.SETTINGS_TAB])
@@ -6880,6 +6955,7 @@ function S.spotOpen()
     S.hardCloseDropdown()
     if S.Pick.open then S.closePicker() end
     if S.Search.active then S.closeSearch() end
+    S.stopThemeUrlInput(false)
     S.Focus.row, S.Capture.row = nil, nil
     S.Spot.open, S.Spot.closing, S.Spot.buf, S.Spot.sel, S.Spot.results = true, false, "", 1, {}
     S.Spot.t, S.Spot.h, S.Spot.selY, S.Spot.rowsT, S.Spot.blinkT = 0, nil, nil, 0, 0
@@ -8752,6 +8828,9 @@ function S.frame()
     local frameDelta = math.min(now - S.lastClock, 0.1)
     local dt = frameDelta * ((S.Cfg.animSpeed or 100) / 100) -- Settings > Effects > Animation speed
     S.lastClock = now
+    if S.ThemeUrlInput and (S.Focus.row ~= S.ThemeUrlInput.row or not S.Win.visible or not S.ThemeUrlInput.row.vis) then
+        S.stopThemeUrlInput(false)
+    end
     S.frameDt = dt
     S.runT = S.runT + dt
 
@@ -8903,7 +8982,13 @@ function S.frame()
         S.Win.dirty = true
     elseif S.Focus.row then
         local row = S.Focus.row
-        if row.kind == "slider" then
+        if S.ThemeUrlInput and S.ThemeUrlInput.row == row then
+            -- The native TextBox is the sole character source; only poll finish/click-away here.
+            if S.edgeKey(0x0D) or S.edgeKey(0x1B)
+                or (S.In.pressed and row.rect and not S.inRect(S.In.x, S.In.y, row.rect.x, row.rect.y, row.rect.w, row.rect.h)) then
+                S.stopThemeUrlInput(true)
+            end
+        elseif row.kind == "slider" then
             S.pollTyping(
                 function(ch)
                     if ch:match("[%d%.%-]") and #(row.buf or "") < 8 then row.buf = (row.buf or "") .. ch end
@@ -9247,6 +9332,7 @@ function S.frame()
                                     S.Capture.row, S.Capture.t = row, os.clock()
                                 elseif row.kind == "textbox" then
                                     S.Focus.row = row
+                                    S.startThemeUrlInput(row)
                                 elseif row.kind == "divider" or row.kind == "note" or row.kind == "progress" or row.kind == "image" then
                                     rowPass = true
                                 end
@@ -9523,6 +9609,7 @@ end
 function UI.Unload()
     if UI.unloaded then return end -- Unload UI button, X, the script's own unload and a re-load can all fire it
     UI.unloaded = true
+    if S.ThemeUrlInput then S.stopThemeUrlInput(false) end
     if S.Perf then S.perfCancelPending("unloaded") end
     if S.Perf.started then pcall(S.perfSend, "unload") end -- before S.unloaded / disconnects
     S.unloaded = true -- every Drawing write of this instance becomes a no-op (see S.scaleDrawing)
