@@ -10224,6 +10224,7 @@ function S.Library:CreateHome(opts)
     opts = opts or {}
     local tab = S.Library:CreateTab(opts.Name or "Home", opts.Icon or "home")
     S.HomeTab = tab
+    if S.Cfg.openTab == "Home" then S.switchTab(tab.index) end -- the window starts on Settings; "Home" must switch explicitly
     local P = game:GetService("Players")
     local lp = P.LocalPlayer
     local function who() return S.Cfg.streamer and "Player" or (lp and lp.DisplayName or "Player") end
