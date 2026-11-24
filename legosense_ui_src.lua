@@ -2959,7 +2959,8 @@ S.Capture = { row = nil }
 S.Focus = { row = nil }
 S.keyStates = {}
 
--- Only the theme image URL may use native text input (for OS paste without clipboard reads).
+-- Native text input (OS paste without clipboard reads) only for the theme image URL and rows created with
+-- NativePaste = true; the game can see a focused TextBox, so keep this list short.
 function S.stopThemeUrlInput(commit)
     local input = S.ThemeUrlInput
     if not input then return end
@@ -2977,7 +2978,7 @@ function S.stopThemeUrlInput(commit)
     S.Win.dirty = true
 end
 function S.startThemeUrlInput(row)
-    if row ~= S.rThemeImgUrl or S.Env.matcha or S.ThemeUrlInput then return end
+    if not (row == S.rThemeImgUrl or row.nativeInput) or S.Env.matcha or S.ThemeUrlInput then return end
     local input = { row = row, conns = {} }
     S.ThemeUrlInput = input
     local ok = pcall(function()
@@ -2996,7 +2997,11 @@ function S.startThemeUrlInput(row)
         box.Parent = parent or game:GetService("CoreGui")
         local function sync()
             if S.ThemeUrlInput ~= input or S.Focus.row ~= row then return end
-            row.value = box.Text:gsub("[\r\n]", "")
+            local text = box.Text:gsub("[\r\n]", "")
+            if row.numeric then text = text:gsub("[^%d%.%-]", "") end -- same characters typing allows
+            if text == row.value then return end
+            row.value = text
+            if not row.finished then S.fireRow(row) end -- like typing: unfinished rows report every change
             S.Win.dirty = true
         end
         input.sync = sync
@@ -9810,7 +9815,7 @@ S.Section.CreateBind = S.Section.CreateKeybind
 function S.Section:CreateTextbox(o, flag)
     o = o or {}
     local r = S.addTextbox(self.section, o.Text or o.Name or "Textbox", o.Default or o.CurrentValue, o.Flag or flag, o.Callback)
-    r.numeric, r.finished = o.Numeric == true, o.Finished == true
+    r.numeric, r.finished, r.nativeInput = o.Numeric == true, o.Finished == true, o.NativePaste == true
     return self:_finish(r, o)
 end
 S.Section.CreateInput = S.Section.CreateTextbox
