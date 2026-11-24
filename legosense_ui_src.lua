@@ -159,6 +159,13 @@ function S.wrapDrawing(o, t)
         end,
         __newindex = function(_, k, v)
             if bad[k] then return end
+            -- Solara saves each Image.Data as {hash}.png and deletes it after loading; the same picture set again while
+            -- that delete is pending logs "Access is denied" / "BLOCKED file path" to the game console. A unique tail
+            -- (ignored by the decoders) keeps every file name new.
+            if k == "Data" and type(v) == "string" and S.Env.executor == "Solara" then
+                S.DataSeq = (S.DataSeq or 0) + 1
+                v = v .. "\0" .. S.DataSeq
+            end
             -- Never blacklist a core property. A write can fail because an object was just removed, and blacklisting
             -- Visible would then hide every Text and Image object.
             if not pcall(function() o[k] = v end) and not S.CoreProps[k] then bad[k] = true end
@@ -211,12 +218,13 @@ function S.roundRect(base)
                 if k == "Color" then st.color = v elseif k == "Transparency" then st.transp = v
                 elseif k == "ZIndex" then st.z = v elseif k == "Thickness" then st.thick = v end
                 if st.img and k ~= "Thickness" and S.RR_FWD[k] then st.img[k] = v end
-                if st.all and S.RR_FWD[k] then
+                local ring9 = st.n9 and k == "Thickness" -- Solara corner rings are baked per thickness: re-lay out instead
+                if st.all and S.RR_FWD[k] and not ring9 then
                     for _, o in ipairs(st.all) do
                         if k == "Transparency" then o.Transparency = v * (st.cov[o] or 1) else o[k] = v end
                     end
                 end
-                return
+                if not ring9 then return end
             end
             if not st.queued then st.queued = true S.RRQueue[#S.RRQueue + 1] = st end
         end,
@@ -224,14 +232,14 @@ function S.roundRect(base)
 end
 function S.rrFree(st)
     if st.all then for _, o in ipairs(st.all) do pcall(function() o:Remove() end) end end
-    st.all, st.cov = nil, nil
+    st.all, st.cov, st.n9 = nil, nil, nil
 end
 function S.rrMk(st, t)
     local ok, o = pcall(Drawing.new, t)
     if not ok or not o then return nil end
     if _G.LS_ALL_DRAWINGS then _G.LS_ALL_DRAWINGS[o] = true end
     o = S.wrapDrawing(o, t)
-    if t ~= "Line" then o.Filled = true end
+    if t == "Square" then o.Filled = true end
     o.Color, o.Transparency, o.ZIndex, o.Visible = st.color or Color3.new(1, 1, 1), st.transp or 1, st.z or 1, false
     if t == "Line" then o.Thickness = st.thick or 1 end
     st.all[#st.all + 1] = o
@@ -245,17 +253,20 @@ end
 function S.rrBuild(st, r)
     S.rrFree(st)
     st.all, st.cov = {}, {}
+    -- Solara (no native rounding) slows down with every visible Drawing: there the fill's anti-alias pixels and the
+    -- outline's inner one are plain tables that take the writes and draw nothing (about 3x fewer objects)
+    local lite = S.FX.noImgRound
     if st.filled then
         st.mid = S.rrMk(st, "Square")
         st.top, st.bot, st.aa = {}, {}, {}
         for i = 1, r do st.top[i] = S.rrMk(st, "Square") st.bot[i] = S.rrMk(st, "Square") end
-        for i = 1, 4 * r do st.aa[i] = S.rrMk(st, "Square") end
+        for i = 1, 4 * r do st.aa[i] = lite and {} or S.rrMk(st, "Square") end
     else
         st.edges, st.ring = {}, {}
         for i = 1, 4 do st.edges[i] = S.rrMk(st, "Square") end
         for c = 1, 4 do
             st.ring[c] = {}
-            for i = 1, r do st.ring[c][i] = { S.rrMk(st, "Square"), S.rrMk(st, "Square"), S.rrMk(st, "Square") } end
+            for i = 1, r do st.ring[c][i] = { S.rrMk(st, "Square"), S.rrMk(st, "Square"), lite and {} or S.rrMk(st, "Square") } end
         end
     end
     st.pFilled, st.pR, st.shown = st.filled, r, false
@@ -299,6 +310,7 @@ function S.rrFillet(st)
 end
 function S.rrApply(st)
     if st.fillet then return S.rrFillet(st) end
+    if S.FX.noImgRound and S.FX.ok and not S.FX.no9 then return S.rr9(st) end
     local s = st.size
     local r = math.floor(math.min(st.r or 0, s.X / 2, s.Y / 2))
     local round = r >= 2
@@ -399,6 +411,61 @@ function S.rrApply(st)
     end
     st.shown = true
 end
+-- Solara renders every 1 px strip as its own draw: a rounded box there is a 9-slice instead. Filled: middle rect + top
+-- and bottom bands + 4 corner Images (quarter disc, tinted by Color; a square corner gets the solid image). Outline:
+-- 4 edge rects + 4 quarter-ring Images. Parts tile on whole device px without overlap (7-8 drawings per box).
+function S.rr9(st)
+    local s = st.size
+    local r = math.floor(math.min(st.r or 0, s.X / 2, s.Y / 2))
+    st.base.Visible = st.vis and r < 2
+    if r < 2 or not st.vis then S.rrHideParts(st) return end
+    if not st.n9 or st.pFilled ~= st.filled then
+        S.rrFree(st)
+        st.all, st.cov = {}, {}
+        st.n9 = { o = {}, d = {} }
+        for i = 1, st.filled and 7 or 8 do st.n9.o[i] = S.rrMk(st, i <= 4 and "Image" or "Square") end
+        -- no Images here after all (S.rrImage also sets noImgRound when Image creation fails): use the strips
+        if #st.n9.o < (st.filled and 7 or 8) then S.FX.no9 = true S.rrFree(st) return S.rrApply(st) end
+        st.pFilled, st.shown = st.filled, false
+    end
+    local N, m = st.n9, st.mask
+    local x, y, w, h = math.floor(st.pos.X + 0.5), math.floor(st.pos.Y + 0.5), math.floor(s.X + 0.5), math.floor(s.Y + 0.5)
+    local on = { (not m) or m.tl == true, (not m) or m.tr == true, (not m) or m.br == true, (not m) or m.bl == true }
+    local t = st.filled and 0 or math.max(1, math.min(r, math.floor((st.thick or 1) + 0.5)))
+    local key = w .. ":" .. h .. ":" .. r .. ":" .. t .. tostring(on[1]) .. tostring(on[2]) .. tostring(on[3]) .. tostring(on[4]) .. tostring(st.arcOnly)
+    local full = key ~= N.key or not st.shown
+    if full then
+        N.key = key
+        -- part i: { dx, dy, width, height, shown }; 1-4 corners (tl tr br bl), 5-8 rects
+        local L = {}
+        for c = 1, 4 do
+            local right, bottom = c == 2 or c == 3, c >= 3
+            L[c] = { right and w - r or 0, bottom and h - r or 0, r, r, st.filled or on[c] }
+            local d = L[c][5] and (on[c] and S.FX.corner(r, c, t) or S.FX.solid())
+            if d and N.d[c] ~= d then N.d[c] = d N.o[c].Data = d end -- Solara keeps every Data value as a file: only real changes
+        end
+        if st.filled then
+            L[5], L[6], L[7] = { 0, r, w, h - 2 * r, h - 2 * r > 0 }, { r, 0, w - 2 * r, r, w - 2 * r > 0 }, { r, h - r, w - 2 * r, r, w - 2 * r > 0 }
+        else
+            local eOn = not st.arcOnly
+            local a, b = on[1] and r or 0, on[2] and r or 0
+            local c3, d4 = on[3] and r or 0, on[4] and r or 0
+            local lT, lB, rT, rB = on[1] and r or t, on[4] and r or t, on[2] and r or t, on[3] and r or t
+            L[5] = { a, 0, w - a - b, t, eOn and w - a - b >= 1 }
+            L[6] = { d4, h - t, w - d4 - c3, t, eOn and w - d4 - c3 >= 1 }
+            L[7] = { 0, lT, t, h - lT - lB, eOn and h - lT - lB >= 1 }
+            L[8] = { w - t, rT, t, h - rT - rB, eOn and h - rT - rB >= 1 }
+        end
+        N.L = L
+        for i, o in ipairs(N.o) do if L[i][5] then o.Size = Vector2.new(L[i][3], L[i][4]) end end
+    end
+    for i, o in ipairs(N.o) do
+        local P = N.L[i]
+        if P[5] then o.Position = Vector2.new(x + P[1], y + P[2]) end
+    end
+    if full then for i, o in ipairs(N.o) do o.Visible = N.L[i][5] and true or false end end
+    st.shown = true
+end
 function S.rrFlush()
     local q = S.RRQueue
     if #q == 0 then return end
@@ -413,7 +480,9 @@ end
 -- A small PNG encoder (grey + alpha, stored deflate) so soft shapes (glows, shadows, solid fills) are generated
 -- in Lua and tinted with Image.Color. Needs buffer + bit32; S.FX.ok is false where they're missing (then every
 -- effect that needs an image is skipped and the old drawing path is used).
-S.FX = { cache = {} }
+-- Solara takes an Image's Rounding write but ignores it (reads back nil): its rounded fills use the strip fallback.
+-- shortcut: matched by executor name, switch to a Rounding read-back probe once checked on Potassium.
+S.FX = { cache = {}, noImgRound = S.Env.executor == "Solara" }
 S.FX.ok = pcall(function()
     local t = {}
     for i = 0, 255 do
@@ -482,6 +551,16 @@ end
 function S.FX.rrSD(x, y, cx, cy, hw, hh, r)
     local qx, qy = math.abs(x - cx) - hw + r, math.abs(y - cy) - hh + r
     return math.min(math.max(qx, qy), 0) + math.sqrt(math.max(qx, 0) ^ 2 + math.max(qy, 0) ^ 2) - r
+end
+-- r x r corner c (1 tl, 2 tr, 3 br, 4 bl) of a radius-r rounded box: quarter disc, or a quarter ring t px thick when t > 0
+function S.FX.corner(r, c, t)
+    local cx, cy = (c == 2 or c == 3) and 0 or r, c >= 3 and 0 or r
+    return S.FX.get("rc" .. r .. "_" .. c .. "_" .. t, r, r, function(px, py)
+        local d = math.sqrt((px - cx) ^ 2 + (py - cy) ^ 2)
+        local a = math.clamp(r - d + 0.5, 0, 1)
+        if t > 0 then a = a - math.clamp(r - t - d + 0.5, 0, 1) end
+        return a
+    end)
 end
 function S.FX.solid() return S.FX.get("solid", 4, 4, function() return 1 end) end
 -- radial gaussian: visible radius is ~45% of the drawn size
@@ -689,12 +768,18 @@ function S.scaleDrawing(o, t)
             if S.SCALED[k] then
                 if l[k] == v and v ~= nil then return end
                 l[k] = v
+                if (k == "Rounding" or k == "Size") and e.rSrc and ((l.Rounding or 0) > 0 or e.rOut) then S.rimgKick(_) end
                 if S.DrawBatch and not e.immediate then S.drawQueue(e, k, v)
                 else
                     S.applyScaled(o, t, k, v, l)
                     e.appliedPosition, e.appliedSize, e.appliedRadius = l.Position, l.Size, l.Radius
                 end
             else
+                if k == "Data" and t == "Image" and S.FX.noImgRound and not S.RImgOwn then
+                    if e.rOut and v == e.rSrc then return end -- the masked copy is showing (S.rimgBuild)
+                    e.rSrc, e.rOut = v, nil
+                    if (l.Rounding or 0) > 0 then S.rimgKick(_) end
+                end
                 if k == "Data" then
                     if S.DrawBatch and not e.immediate then S.drawQueue(e, k, v) else o[k] = v end
                     return -- re-setting picture data can intentionally force a decode
@@ -1155,9 +1240,30 @@ function S.truncate(label, availPx)
     return label:sub(1, maxChars - 2) .. ".."
 end
 
+function S.textWidth(text, size, font)
+    size = size or S.FS - 1
+    text = tostring(text or "")
+    if S.Env.executor == "Solara" and text ~= "" then return S.glyphSum(text, size, font or S.FontIds[S.Cfg.font] or 0) end
+    return S.textWidthRaw(text, size, font)
+end
+-- Solara reads TextBounds through a slow round trip (~3 ms after each text change; wrapping one description cost ~40 ms
+-- a frame while the sidebar slid): sum per-glyph advances there, each measured once as width("a"..ch.."a") - width("aa")
+S.GlyphW = {}
+function S.glyphSum(text, size, font)
+    local key = size .. ":" .. tostring(font)
+    local t = S.GlyphW[key]
+    if not t then t = { [""] = 0, base = S.textWidthRaw("aa", size, font) } S.GlyphW[key] = t end
+    local w = 0
+    for _, ch in ipairs(S.textChars(text)) do
+        local g = t[ch]
+        if not g then g = math.max(0, S.textWidthRaw("a" .. ch .. "a", size, font) - t.base) t[ch] = g end
+        w = w + g
+    end
+    return w
+end
 -- Only this permanently hidden probe bypasses frame buffering: TextBounds must describe
 -- the text we are measuring now, not the previous frame's tooltip or wrap candidate.
-function S.textWidth(text, size, font)
+function S.textWidthRaw(text, size, font)
     size = size or S.FS - 1
     text = tostring(text or "")
     if not S.Env.matcha then
@@ -1566,9 +1672,12 @@ function S.cropSet(o, png, dec)
     if not o or S.Env.matcha then return end
     local c = { data = png }
     S.Crop[o] = c
-    if dec then c.w, c.h, c.px = dec.w, dec.h, dec.px return end
-    local ok, d = pcall(S.pngDecode, png)
-    if ok and d then c.w, c.h, c.px = d.w, d.h, d.px end
+    if dec then c.w, c.h, c.px = dec.w, dec.h, dec.px
+    else
+        local ok, d = pcall(S.pngDecode, png)
+        if ok and d then c.w, c.h, c.px = d.w, d.h, d.px end
+    end
+    if S.FX.noImgRound then S.rimgRecrop(o) end
 end
 -- Decode the first image of a standalone GIF frame (the Nyan URLs serve GIF89a, not PNG).
 function S.gifDecode(data, alive)
@@ -1659,8 +1768,10 @@ function S.gifDecode(data, alive)
 end
 -- picture resampled to its exact screen size (alpha-weighted box filter) -> { w, h, px = BGRA, data = TGA }. A big
 -- picture drawn small (150 px avatar at 41 px) is shrunk by the renderer without filtering = pixelated.
-function S.imgFit(png, W, H, alive)
+-- png may also be an already decoded { w, h, px }; cover = centre-crop to W:H instead of stretching
+function S.imgFit(png, W, H, alive, cover)
     if S.Env.matcha or not S.FX.ok then return nil end
+    if type(png) == "table" then return S.imgResample(png, W, H, alive, cover) end
     -- big pictures (theme art) stay decoded: re-unpacking the PNG on every new size was a ~140 ms frame each while the
     -- window was resized with Theme image blur on. One slot: only the current big picture is kept.
     local big = #png > 50000
@@ -1679,13 +1790,21 @@ function S.imgFit(png, W, H, alive)
         if not ok or not d then return nil end
         if big then S.DecBig = { png = png, dec = d } end
     end
+    return S.imgResample(d, W, H, alive, cover)
+end
+function S.imgResample(d, W, H, alive, cover)
     local w, h, src = d.w, d.h, d.px
     local sx, sy = w / W, h / H
+    local ox, oy = 0, 0
+    if cover then
+        local k = math.min(sx, sy)
+        ox, oy, sx, sy = (w - W * k) / 2, (h - H * k) / 2, k, k
+    end
     local px = buffer.create(W * H * 4)
     for ty = 0, H - 1 do
-        local y0, y1 = ty * sy, (ty + 1) * sy
+        local y0, y1 = oy + ty * sy, oy + (ty + 1) * sy
         for tx = 0, W - 1 do
-            local x0, x1 = tx * sx, (tx + 1) * sx
+            local x0, x1 = ox + tx * sx, ox + (tx + 1) * sx
             local sa, sr, sg, sb, area = 0, 0, 0, 0, 0
             for yy = math.floor(y0), math.min(h - 1, math.ceil(y1) - 1) do
                 local wy = math.min(y1, yy + 1) - math.max(y0, yy)
@@ -1704,11 +1823,105 @@ function S.imgFit(png, W, H, alive)
         end
         if S.budget() and alive and not alive() then return nil end
     end
+    return { w = W, h = H, px = px, data = S.FX.tga(W, H, px) }
+end
+-- BGRA buffer (top row first) -> 32-bit TGA string
+function S.FX.tga(W, H, px)
     local b = buffer.create(18 + W * H * 4)
     buffer.writeu8(b, 2, 2) buffer.writeu16(b, 12, W) buffer.writeu16(b, 14, H)
     buffer.writeu8(b, 16, 32) buffer.writeu8(b, 17, 0x28)
     buffer.copy(b, 18, px, 0, W * H * 4)
-    return { w = W, h = H, px = px, data = buffer.tostring(b) }
+    return buffer.tostring(b)
+end
+-- our own uncompressed top-left TGAs (S.FX.tga, the picker's hue strip) -> { w, h, px = BGRA }
+function S.tgaDecode(s)
+    if #s < 18 or s:byte(3) ~= 2 then return nil end
+    local b = buffer.fromstring(s)
+    local w, h, bp = buffer.readu16(b, 12), buffer.readu16(b, 14), buffer.readu8(b, 16) // 8
+    if (bp ~= 3 and bp ~= 4) or w < 1 or h < 1 or #s < 18 + w * h * bp or bit32.band(buffer.readu8(b, 17), 0x20) == 0 then return nil end
+    local px = buffer.create(w * h * 4)
+    if bp == 4 then buffer.copy(px, 0, b, 18, w * h * 4) return { w = w, h = h, px = px } end
+    for i = 0, w * h - 1 do
+        local o = 18 + i * 3
+        buffer.writeu32(px, i * 4, buffer.readu8(b, o) + buffer.readu8(b, o + 1) * 256 + buffer.readu8(b, o + 2) * 65536 + 0xFF000000)
+    end
+    return { w = w, h = h, px = px }
+end
+-- Solara ignores Image Rounding: there an image with Rounding > 0 gets its corners baked into the alpha at its device
+-- size. The source Data is kept (e.rSrc), rebuilt only when source, size or radius change, 0.2 s after the last change.
+function S.rimgKick(p)
+    local e = S.ScaleLogical[p]
+    if not e or not e.rSrc then return end
+    e.rDue = os.clock() + 0.2
+    if e.rBusy then return end
+    e.rBusy = true
+    task.spawn(function()
+        repeat
+            while os.clock() < e.rDue and not S.unloaded and not e.removed do task.wait() end
+            local due = e.rDue
+            if not S.unloaded and not e.removed then pcall(S.rimgBuild, p, e) end
+        until e.rDue == due or S.unloaded or e.removed
+        e.rBusy = false
+    end)
+end
+function S.rimgBuild(p, e)
+    local src, sz = e.rSrc, e.l.Size
+    if type(src) ~= "string" or #src < 18 or not sz then return end
+    local W, H = S.devPx(sz.X), S.devPx(sz.Y)
+    local rd = math.min((e.l.Rounding or 0) * S.K, W / 2, H / 2)
+    local key = W .. "x" .. H .. ":" .. rd .. ":" .. tostring(e.rCover)
+    if e.rOut and e.rKeySrc == src and e.rKey == key then return end
+    e.rKeySrc, e.rKey = src, key
+    local c = S.Crop[p]
+    if rd < 0.5 or W * H > 250000 then -- no corners (or too big to redo cheaply): back to the plain source
+        if e.rOut then
+            e.rOut, e.rFit = nil, nil
+            if c then c.data, c.key = src, nil else S.rimgSet(p, src) end
+        end
+        return
+    end
+    local dec = e.rDecSrc == src and e.rDec
+    if not dec then
+        local alive = function() return not S.unloaded and not e.removed and e.rSrc == src end
+        if src:sub(2, 4) == "PNG" then dec = S.pngDecode(src, alive)
+        elseif src:sub(1, 3) == "GIF" then dec = S.gifDecode(src, alive)
+        else dec = S.tgaDecode(src) end
+        if not dec or e.rSrc ~= src then return end
+        e.rDec, e.rDecSrc = dec, src
+    end
+    local f = S.imgResample(dec, W, H, function() return not S.unloaded and not e.removed and e.rSrc == src end, e.rCover)
+    if not f or e.rSrc ~= src then return end
+    local px, n = f.px, math.min(math.ceil(rd), W, H)
+    for y = 0, H - 1 do
+        if y < n or y >= H - n then
+            for x = 0, W - 1 do
+                if x < n or x >= W - n then
+                    local a = math.clamp(0.5 - S.FX.rrSD(x + 0.5, y + 0.5, W / 2, H / 2, W / 2, H / 2, rd), 0, 1)
+                    local i = (y * W + x) * 4
+                    if a < 1 then buffer.writeu8(px, i + 3, math.floor(buffer.readu8(px, i + 3) * a + 0.5)) end
+                end
+            end
+        end
+    end
+    f.data = S.FX.tga(W, H, px)
+    e.rFit, e.rOut = f, f.data
+    c = S.Crop[p]
+    if c then c.data, c.w, c.h, c.px, c.key = f.data, f.w, f.h, f.px, nil else S.rimgSet(p, f.data) end
+end
+-- our own Data write (masked picture / crop rows): not a new source
+function S.rimgSet(p, d)
+    S.RImgOwn = true
+    pcall(function() p.Data = d end)
+    S.RImgOwn = false
+end
+-- S.cropSet replaced the crop record with the plain source: put the masked picture back
+function S.rimgRecrop(p)
+    local e, c = S.ScaleLogical[p], S.Crop[p]
+    if not e or not c or not e.rFit then return end
+    if c.data == e.rKeySrc then
+        local f = e.rFit
+        c.data, c.w, c.h, c.px, c.key = f.data, f.w, f.h, f.px, nil
+    else e.rKey = nil S.rimgKick(p) end
 end
 function S.devPx(logical) return math.max(1, math.floor(logical * (S.K or 1) + 0.5)) end
 -- picture blurred for "Theme image blur": the resized picture is cached per size, the blur runs at HALF resolution
@@ -3401,6 +3614,10 @@ function S.addDiscord(sec, invite)
             txt("", S.FS - 1, S.Theme.Dim),          -- 4 members
         },
     }
+    -- Solara doesn't fit a picture to Size the way Potassium does (the banner came out off-centre): there the banner
+    -- is baked at its exact device size, centre-cropped to the card (S.rimgBuild)
+    local eImg = S.FX.noImgRound and S.ScaleLogical[row.img]
+    if eImg then eImg.rCover = true end
     S.loadIcon("external-link", function(d) row.segs[5].Data = d S.cropSet(row.segs[5], d) row.icoJoin = true end)
     -- solid shapes are cut like rectangles; pictures are cut row by row (S.cropSet)
     for _, k in ipairs({ 1, 3, 4 }) do S.ClipCut[row.segs[k]] = true end
@@ -7943,7 +8160,7 @@ end
 -- Matcha keeps the estimate its layout was tuned with.
 function S.TW(o, cw)
     local e = S.ScaleLogical[o]
-    if e and (e.pending.Text ~= nil or e.pending.Size ~= nil or e.pending.Font ~= nil) then
+    if (e and (e.pending.Text ~= nil or e.pending.Size ~= nil or e.pending.Font ~= nil)) or S.Env.executor == "Solara" then
         return S.textWidth(o.Text or "", tonumber(o.Size) or S.FS, o.Font)
     end
     local ok, tb = false, nil
@@ -8043,7 +8260,10 @@ function S.clipObj(o, top, bot, mul)
         end
         if c.key ~= key then
             c.key = key
-            o.Data = (key == "full") and c.data or S.cropTGA(c, c.r0, c.r1)
+            local d = (key == "full") and c.data or S.cropTGA(c, c.r0, c.r1)
+            S.RImgOwn = true -- crop rows of the current picture, not a new source (S.rimgBuild)
+            o.Data = d
+            S.RImgOwn = false
         end
         o.Transparency = (S.Bases[o] or 1) * S.Cfg.opacity * mul
         return
@@ -9547,7 +9767,14 @@ function S.frame()
 end
 
 S.calibrateFont()
+-- Solara: a callback thread copies its connecting thread's identity when it fires, and a failed require in the host
+-- script can leave that at 2, where Drawing.new and Remove fail (the menu froze). Restore the load identity per frame.
+S.LoadIdentity = S.Env.executor == "Solara" and type(getthreadidentity) == "function" and getthreadidentity() or nil
+function S.fixIdentity()
+    if S.LoadIdentity and getthreadidentity() ~= S.LoadIdentity then pcall(setthreadidentity, S.LoadIdentity) end
+end
 UI.Conn = S.RunService.RenderStepped:Connect(function(dt)
+    S.fixIdentity()
     local started = os.clock()
     local P = S.Perf
     local sampled = not S.Env.matcha and pcall(S.perfFrame, dt)
@@ -9594,6 +9821,7 @@ S.bindCtrlSpace()
 if not S.Env.matcha then
     pcall(function()
         S.RunService:BindToRenderStep("LSBlur", Enum.RenderPriority.Last.Value, function(dt)
+            S.fixIdentity()
             local started = os.clock()
             local phaseOk, phase = pcall(S.perfPhase, started)
             local ok, e = pcall(S.Blur.step, dt)
